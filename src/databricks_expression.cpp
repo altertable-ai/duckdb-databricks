@@ -1,11 +1,14 @@
 #include "databricks_expression.hpp"
 
+#include "databricks_literal.hpp"
 #include "databricks_utils.hpp"
 #include "duckdb/common/enum_util.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/planner/expression/bound_between_expression.hpp"
+#include "duckdb/planner/expression/bound_case_expression.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
@@ -253,7 +256,23 @@ static string ColumnSql(const vector<DatabricksColumn> &columns, const LogicalGe
 		return string();
 	}
 	auto column_id = column_ids[column_ref.binding.column_index].GetPrimaryIndex();
-	if (column_id >= columns.size() || !DatabricksExpressions::SupportsFilterPushdown(columns[column_id])) {
+	if (column_id >= columns.size()) {
+		return string();
+	}
+	auto &alias = column_ref.GetAlias();
+	if (!alias.empty() && alias != columns[column_id].name) {
+		for (auto &candidate : column_ids) {
+			if (candidate.IsVirtualColumn()) {
+				continue;
+			}
+			auto candidate_id = candidate.GetPrimaryIndex();
+			if (candidate_id < columns.size() && columns[candidate_id].name == alias) {
+				column_id = candidate_id;
+				break;
+			}
+		}
+	}
+	if (!DatabricksExpressions::SupportsFilterPushdown(columns[column_id])) {
 		return string();
 	}
 	return DatabricksQuoteIdentifier(columns[column_id].name);
@@ -412,12 +431,10 @@ string DatabricksExpressions::TransformFilters(const vector<column_t> &column_id
 	if (!filters || filters->filters.empty()) {
 		return string();
 	}
+	(void)column_ids;
 	vector<string> conditions;
 	for (auto &entry : filters->filters) {
-		if (entry.first >= column_ids.size()) {
-			throw InternalException("Databricks filter pushdown: filter index %llu is out of range", entry.first);
-		}
-		auto column_id = column_ids[entry.first];
+		auto column_id = entry.first;
 		if (IsVirtualColumn(column_id)) {
 			throw InternalException("Databricks filter pushdown: unexpected filter on a virtual column");
 		}
@@ -430,6 +447,265 @@ string DatabricksExpressions::TransformFilters(const vector<column_t> &column_id
 		}
 	}
 	return StringUtil::Join(conditions, " AND ");
+}
+
+[[noreturn]] static void RejectDml(const string &what) {
+	throw NotImplementedException("%s is not supported for Databricks tables; use databricks_execute() with MERGE",
+	                              what);
+}
+
+static string DmlColumn(const LogicalGet &get, const Expression &expr) {
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+		return string();
+	}
+	auto &column_ref = expr.Cast<BoundColumnRefExpression>();
+	if (column_ref.depth > 0) {
+		RejectDml("Subqueries");
+	}
+	if (column_ref.binding.table_index != get.table_index) {
+		RejectDml("Joins");
+	}
+	auto &column_ids = get.GetColumnIds();
+	if (column_ref.binding.column_index >= column_ids.size()) {
+		throw InternalException("Databricks DML column reference is out of range");
+	}
+	auto &column_index = column_ids[column_ref.binding.column_index];
+	if (column_index.IsVirtualColumn()) {
+		RejectDml("rowid");
+	}
+	return DatabricksQuoteIdentifier(get.GetColumnName(column_index));
+}
+
+static string JoinArgs(const LogicalGet &get, const vector<unique_ptr<Expression>> &children) {
+	vector<string> args;
+	for (auto &child : children) {
+		args.push_back(DatabricksExpressions::TranslateDml(get, *child));
+	}
+	return StringUtil::Join(args, ", ");
+}
+
+static string ReescapeLikePattern(const string &pattern, char escape) {
+	string result;
+	for (idx_t i = 0; i < pattern.size(); i++) {
+		auto ch = pattern[i];
+		if (escape != '\0' && ch == escape) {
+			if (i + 1 >= pattern.size()) {
+				throw InvalidInputException("LIKE pattern ends with an escape character");
+			}
+			ch = pattern[++i];
+			if (ch == '\\' || ch == '%' || ch == '_') {
+				result.push_back('\\');
+			}
+			result.push_back(ch);
+			continue;
+		}
+		if (ch == '\\') {
+			result += "\\\\";
+		} else {
+			result.push_back(ch);
+		}
+	}
+	return result;
+}
+
+static string LikePatternSql(const LogicalGet &get, const Expression &pattern, char escape) {
+	auto constant = ConstantValue(pattern);
+	if (constant && !constant->IsNull() && constant->type().id() == LogicalTypeId::VARCHAR) {
+		return DatabricksQuoteString(ReescapeLikePattern(StringValue::Get(*constant), escape));
+	}
+	auto sql = DatabricksExpressions::TranslateDml(get, pattern);
+	if (escape == '\\') {
+		return sql;
+	}
+	if (escape != '\0') {
+		RejectDml("LIKE ESCAPE");
+	}
+	return "replace(" + sql + ", " + DatabricksQuoteString("\\") + ", " + DatabricksQuoteString("\\\\") + ")";
+}
+
+static char LikeEscape(const LogicalGet &get, const Expression &expr) {
+	(void)get;
+	auto constant = ConstantValue(expr);
+	if (!constant || constant->IsNull() || constant->type().id() != LogicalTypeId::VARCHAR) {
+		RejectDml("LIKE ESCAPE");
+	}
+	auto text = StringValue::Get(*constant);
+	if (text.size() > 1) {
+		RejectDml("LIKE ESCAPE");
+	}
+	return text.empty() ? '\0' : text[0];
+}
+
+static string LikeSql(const LogicalGet &get, const vector<unique_ptr<Expression>> &children, const string &keyword) {
+	if (children.size() < 2 || children.size() > 3) {
+		RejectDml("LIKE");
+	}
+	auto escape = children.size() == 3 ? LikeEscape(get, *children[2]) : '\0';
+	return "(" + DatabricksExpressions::TranslateDml(get, *children[0]) + " " + keyword + " " +
+	       LikePatternSql(get, *children[1], escape) + " ESCAPE " + DatabricksQuoteString("\\") + ")";
+}
+
+static string FunctionSql(const LogicalGet &get, const BoundFunctionExpression &func) {
+	auto &name = func.function.name;
+	if (name == "+" || name == "-" || name == "*" || name == "/" || name == "%") {
+		if (func.children.size() == 1 && (name == "+" || name == "-")) {
+			return "(" + name + DatabricksExpressions::TranslateDml(get, *func.children[0]) + ")";
+		}
+		if (func.children.size() == 2) {
+			return "(" + DatabricksExpressions::TranslateDml(get, *func.children[0]) + " " + name + " " +
+			       DatabricksExpressions::TranslateDml(get, *func.children[1]) + ")";
+		}
+	}
+	if (name == "//" || name == "divide") {
+		if (func.children.size() != 2) {
+			RejectDml("Function " + name);
+		}
+		return "div(" + JoinArgs(get, func.children) + ")";
+	}
+	if (name == "||") {
+		return "concat(" + JoinArgs(get, func.children) + ")";
+	}
+	string databricks_name;
+	if (name == "lower" || name == "lcase") {
+		databricks_name = "lower";
+	} else if (name == "upper" || name == "ucase") {
+		databricks_name = "upper";
+	} else if (name == "length" || name == "len" || name == "char_length" || name == "character_length" ||
+	           name == "strlen") {
+		databricks_name = "length";
+	} else if (name == "substring" || name == "substr") {
+		databricks_name = "substring";
+	} else if (name == "prefix" || name == "starts_with") {
+		databricks_name = "startswith";
+	} else if (name == "suffix" || name == "ends_with") {
+		databricks_name = "endswith";
+	} else if (name == "ceiling") {
+		databricks_name = "ceil";
+	} else if (name == "trim" || name == "ltrim" || name == "rtrim" || name == "concat" || name == "replace" ||
+	           name == "contains" || name == "abs" || name == "round" || name == "floor" || name == "ceil") {
+		databricks_name = name;
+	} else if (name == "~~" || name == "like_escape") {
+		return LikeSql(get, func.children, "LIKE");
+	} else if (name == "!~~" || name == "not_like_escape") {
+		return LikeSql(get, func.children, "NOT LIKE");
+	} else if (name == "~~*" || name == "ilike_escape") {
+		return LikeSql(get, func.children, "ILIKE");
+	} else if (name == "!~~*" || name == "not_ilike_escape") {
+		return LikeSql(get, func.children, "NOT ILIKE");
+	} else {
+		RejectDml("Function " + name);
+	}
+	if ((name == "trim" || name == "ltrim" || name == "rtrim") && func.children.size() == 2) {
+		auto lead = name == "ltrim" ? "LEADING " : name == "rtrim" ? "TRAILING " : "";
+		return string("trim(") + lead + DatabricksExpressions::TranslateDml(get, *func.children[1]) + " FROM " +
+		       DatabricksExpressions::TranslateDml(get, *func.children[0]) + ")";
+	}
+	return databricks_name + "(" + JoinArgs(get, func.children) + ")";
+}
+
+string DatabricksExpressions::TranslateDml(const LogicalGet &get, const Expression &expr) {
+	auto column = DmlColumn(get, expr);
+	if (!column.empty()) {
+		return column;
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+		return DatabricksLiteral::Render(expr.Cast<BoundConstantExpression>().value);
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CAST) {
+		auto &cast_expr = expr.Cast<BoundCastExpression>();
+		auto function = string(cast_expr.try_cast ? "TRY_CAST" : "CAST");
+		return function + "(" + TranslateDml(get, *cast_expr.child) + " AS " +
+		       DatabricksLiteral::TypeName(cast_expr.return_type) + ")";
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COMPARISON) {
+		auto &comparison = expr.Cast<BoundComparisonExpression>();
+		return "(" + TranslateDml(get, *comparison.left) + " " + TransformComparison(comparison.GetExpressionType()) +
+		       " " + TranslateDml(get, *comparison.right) + ")";
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) {
+		auto &conjunction = expr.Cast<BoundConjunctionExpression>();
+		auto joiner = expr.GetExpressionType() == ExpressionType::CONJUNCTION_AND ? " AND " : " OR ";
+		if (expr.GetExpressionType() != ExpressionType::CONJUNCTION_AND &&
+		    expr.GetExpressionType() != ExpressionType::CONJUNCTION_OR) {
+			RejectDml("This boolean expression");
+		}
+		vector<string> parts;
+		for (auto &child : conjunction.children) {
+			parts.push_back(TranslateDml(get, *child));
+		}
+		return "(" + StringUtil::Join(parts, joiner) + ")";
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_BETWEEN) {
+		auto &between = expr.Cast<BoundBetweenExpression>();
+		auto input = TranslateDml(get, *between.input);
+		auto lower = TranslateDml(get, *between.lower);
+		auto upper = TranslateDml(get, *between.upper);
+		if (between.lower_inclusive && between.upper_inclusive) {
+			return "(" + input + " BETWEEN " + lower + " AND " + upper + ")";
+		}
+		auto left_op = between.lower_inclusive ? " >= " : " > ";
+		auto right_op = between.upper_inclusive ? " <= " : " < ";
+		return "((" + input + left_op + lower + ") AND (" + input + right_op + upper + "))";
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CASE) {
+		auto &case_expr = expr.Cast<BoundCaseExpression>();
+		string sql = "CASE";
+		for (auto &check : case_expr.case_checks) {
+			sql += " WHEN " + TranslateDml(get, *check.when_expr) + " THEN " + TranslateDml(get, *check.then_expr);
+		}
+		if (case_expr.else_expr) {
+			sql += " ELSE " + TranslateDml(get, *case_expr.else_expr);
+		}
+		sql += " END";
+		return sql;
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+		return FunctionSql(get, expr.Cast<BoundFunctionExpression>());
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_OPERATOR) {
+		auto &op_expr = expr.Cast<BoundOperatorExpression>();
+		if (expr.GetExpressionType() == ExpressionType::OPERATOR_NOT && op_expr.children.size() == 1) {
+			return "NOT (" + TranslateDml(get, *op_expr.children[0]) + ")";
+		}
+		if ((expr.GetExpressionType() == ExpressionType::OPERATOR_IS_NULL ||
+		     expr.GetExpressionType() == ExpressionType::OPERATOR_IS_NOT_NULL) &&
+		    op_expr.children.size() == 1) {
+			auto keyword = expr.GetExpressionType() == ExpressionType::OPERATOR_IS_NULL ? " IS NULL" : " IS NOT NULL";
+			return "(" + TranslateDml(get, *op_expr.children[0]) + keyword + ")";
+		}
+		if ((expr.GetExpressionType() == ExpressionType::COMPARE_IN ||
+		     expr.GetExpressionType() == ExpressionType::COMPARE_NOT_IN) &&
+		    op_expr.children.size() >= 2) {
+			vector<string> values;
+			for (idx_t i = 1; i < op_expr.children.size(); i++) {
+				values.push_back(TranslateDml(get, *op_expr.children[i]));
+			}
+			auto keyword = expr.GetExpressionType() == ExpressionType::COMPARE_IN ? " IN (" : " NOT IN (";
+			return "(" + TranslateDml(get, *op_expr.children[0]) + keyword + StringUtil::Join(values, ", ") + "))";
+		}
+		if (expr.GetExpressionType() == ExpressionType::OPERATOR_COALESCE) {
+			return "coalesce(" + JoinArgs(get, op_expr.children) + ")";
+		}
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_REF) {
+		auto &reference = expr.Cast<BoundReferenceExpression>();
+		auto &column_ids = get.GetColumnIds();
+		if (!reference.GetAlias().empty()) {
+			for (auto &column_index : column_ids) {
+				if (!column_index.IsVirtualColumn() && get.GetColumnName(column_index) == reference.GetAlias()) {
+					return DatabricksQuoteIdentifier(reference.GetAlias());
+				}
+			}
+		}
+		if (reference.index >= column_ids.size() || column_ids[reference.index].IsVirtualColumn()) {
+			RejectDml("rowid");
+		}
+		return DatabricksQuoteIdentifier(get.GetColumnName(column_ids[reference.index]));
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_SUBQUERY) {
+		RejectDml("Subqueries");
+	}
+	RejectDml("This expression");
 }
 
 } // namespace duckdb

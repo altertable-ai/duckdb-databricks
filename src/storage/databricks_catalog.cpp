@@ -15,6 +15,7 @@
 #include "duckdb/planner/operator/logical_update.hpp"
 #include "duckdb/storage/database_size.hpp"
 #include "databricks_ddl.hpp"
+#include "storage/databricks_dml.hpp"
 #include "storage/databricks_insert.hpp"
 #include "storage/databricks_schema_entry.hpp"
 #include "storage/databricks_table_entry.hpp"
@@ -157,15 +158,23 @@ PhysicalOperator &DatabricksCatalog::PlanInsert(ClientContext &, PhysicalPlanGen
 	insert.children.push_back(*plan);
 	return insert;
 }
-PhysicalOperator &DatabricksCatalog::PlanDelete(ClientContext &, PhysicalPlanGenerator &, LogicalDelete &) {
-	ThrowWriteNotImplemented("DELETE");
+PhysicalOperator &DatabricksCatalog::PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner,
+                                                LogicalDelete &op) {
+	ThrowIfReadOnly();
+	auto &table = op.table.Cast<DatabricksTableEntry>();
+	auto sql = DatabricksDml::DeleteSql(context, op);
+	return planner.Make<DatabricksDml>(op, GetName(), table.schema.name, std::move(sql));
 }
 PhysicalOperator &DatabricksCatalog::PlanDelete(ClientContext &, PhysicalPlanGenerator &, LogicalDelete &,
                                                 PhysicalOperator &) {
 	ThrowWriteNotImplemented("DELETE");
 }
-PhysicalOperator &DatabricksCatalog::PlanUpdate(ClientContext &, PhysicalPlanGenerator &, LogicalUpdate &) {
-	ThrowWriteNotImplemented("UPDATE");
+PhysicalOperator &DatabricksCatalog::PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner,
+                                                LogicalUpdate &op) {
+	ThrowIfReadOnly();
+	auto &table = op.table.Cast<DatabricksTableEntry>();
+	auto sql = DatabricksDml::UpdateSql(context, op);
+	return planner.Make<DatabricksDml>(op, GetName(), table.schema.name, std::move(sql));
 }
 PhysicalOperator &DatabricksCatalog::PlanUpdate(ClientContext &, PhysicalPlanGenerator &, LogicalUpdate &,
                                                 PhysicalOperator &) {

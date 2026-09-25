@@ -52,7 +52,9 @@ Schema, table, and column metadata is cached on the attached database until `dat
 
 `INSERT`, `COPY`, and `CREATE TABLE AS` send batched `INSERT … VALUES` statements. Each batch commits on its own. If a later batch fails, the batches already sent stay written. An insert that fits in one batch is atomic. `ROLLBACK` after a write does not undo it.
 
-`UPDATE` and `DELETE` from DuckDB syntax are not available yet; send those statements with `databricks_execute`.
+`UPDATE`, `DELETE`, and `TRUNCATE` each become one warehouse statement. The reported count is the number of rows that statement affected. A warehouse runs in ANSI mode: division by zero and integer overflow raise an error. String functions count characters the same way in both engines. `NaN` equals itself in both engines.
+
+Joins, subqueries, `UPDATE ... FROM`, and `RETURNING` are rejected. Send those with `databricks_execute`, using `MERGE` when the change depends on another table.
 
 Filters, `LIMIT`, and `ORDER BY ... LIMIT` are sent to the warehouse when `dbx_filter_pushdown` and `dbx_order_pushdown` are on. A pushed filter is not checked again in DuckDB. `FLOAT` and `DOUBLE` comparisons, collated strings, and `JSON` stay in DuckDB. `EXPLAIN` shows a pushed `ORDER BY` or `LIMIT` as `Pushed Down`. `EXPLAIN ANALYZE` shows the statement text as `SQL`.
 

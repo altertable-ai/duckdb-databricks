@@ -234,8 +234,103 @@ def literal_to_python(text):
     return text
 
 
+def table_rows(schema, table):
+    if schema.lower() == "sales" and table.lower() == "orders":
+        return ORDERS
+    for key, value in STATE.tables.items():
+        if key[0].lower() == schema.lower() and key[1].lower() == table.lower():
+            return value["rows"]
+    return None
+
+
+def replace_rows(schema, table, rows):
+    if schema.lower() == "sales" and table.lower() == "orders":
+        ORDERS[:] = rows
+        return
+    for key, value in STATE.tables.items():
+        if key[0].lower() == schema.lower() and key[1].lower() == table.lower():
+            value["rows"] = rows
+            return
+
+
+def dml_target(sql):
+    match = re.search(r"(?:UPDATE|FROM|TABLE)\s+`([^`]+)`\.`([^`]+)`\.`([^`]+)`", sql, re.I)
+    if not match:
+        return None
+    return match.group(2), match.group(3)
+
+
+def strip_cast(text):
+    match = re.fullmatch(r"CAST\((.*) AS [A-Za-z0-9_(), ]+\)", text.strip(), re.I)
+    if match:
+        return match.group(1).strip()
+    return text.strip()
+
+
+def apply_assignments(rows, body):
+    assignments = []
+    for part in split_top(body, ","):
+        match = re.match(r"`([^`]+)`\s*=\s*(.+)", part.strip(), re.S)
+        if not match:
+            continue
+        value = strip_cast(match.group(2))
+        if value.upper() == "DEFAULT" or not (
+            value.startswith("'") or re.fullmatch(r"-?\d+(?:BD)?", value) or value.upper() in ("TRUE", "FALSE", "NULL")
+        ):
+            continue
+        assignments.append((match.group(1), literal_to_python(value)))
+    for row in rows:
+        for column, value in assignments:
+            row[column] = value
+
+
+def apply_dml(sql):
+    upper = sql.lstrip().upper()
+    if not upper.startswith(("UPDATE ", "DELETE ", "TRUNCATE ")):
+        return None
+    located = dml_target(sql)
+    if not located:
+        return 0
+    rows = table_rows(*located)
+    if rows is None:
+        return 0
+    if upper.startswith("TRUNCATE "):
+        count = len(rows)
+        replace_rows(*located, [])
+        return count
+    pred, _order, _limit, _offset = clause_span(sql)
+    if upper.startswith("DELETE "):
+        if not pred:
+            count = len(rows)
+            replace_rows(*located, [])
+            return count
+        kept = []
+        removed = 0
+        for row in rows:
+            if eval_pred(row, pred):
+                removed += 1
+            else:
+                kept.append(row)
+        replace_rows(*located, kept)
+        return removed
+    set_at = upper.find(" SET ")
+    where_at = upper.find(" WHERE ")
+    if set_at < 0:
+        return 0
+    body_end = where_at if where_at > set_at else len(sql)
+    body = sql[set_at + len(" SET ") : body_end]
+    matched = [row for row in rows if not pred or eval_pred(row, pred)]
+    apply_assignments(matched, body)
+    return len(matched)
+
+
 def apply_statement(sql):
     upper = sql.lstrip().upper()
+    if upper.startswith(("UPDATE ", "DELETE ", "TRUNCATE ")):
+        try:
+            return apply_dml(sql)
+        except Exception:
+            return 0
     if upper.startswith("CREATE SCHEMA"):
         match = re.search(r"CREATE SCHEMA(?: IF NOT EXISTS)? `[^`]+`\.`([^`]+)`", sql, re.I)
         if match:
@@ -793,9 +888,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _submit(self, body):
         sql = body.get("statement", "")
+        affected = None
         with STATE.lock:
             STATE.recorded.append(sql)
-            apply_statement(sql)
+            affected = apply_statement(sql)
             if "__429__" in sql and sql not in STATE.seen_429:
                 STATE.seen_429.add(sql)
                 STATE.http_429 += 1
@@ -833,6 +929,8 @@ class Handler(BaseHTTPRequestHandler):
             body_out = {"statement_id": statement_id, "status": {"state": "PENDING"}}
         elif body.get("format") == "JSON_ARRAY" or "information_schema" in sql.lower():
             meta = metadata_result(sql, statement["parameters"])
+            if meta is None and affected is not None:
+                meta = json_table([("num_affected_rows", "BIGINT")], [[affected]])
             if meta is None:
                 meta = json_table([("n", "INT")], [[1]])
             body_out = {"statement_id": statement_id, "status": {"state": "SUCCEEDED"}, **meta}

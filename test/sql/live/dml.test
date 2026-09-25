@@ -1,0 +1,64 @@
+# name: test/sql/live/dml.test
+# description: insert, update, delete, and truncate on a real warehouse
+# group: [live]
+
+require-env DATABRICKS_HOST
+
+require-env DATABRICKS_WAREHOUSE_ID
+
+require-env DATABRICKS_TEST_CATALOG
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_TEST_SCHEMA
+
+require databricks
+
+statement ok
+CREATE SECRET dbx (
+	TYPE databricks,
+	HOST '${DATABRICKS_HOST}',
+	WAREHOUSE_ID '${DATABRICKS_WAREHOUSE_ID}',
+	TOKEN '${DATABRICKS_TOKEN}',
+	CATALOG '${DATABRICKS_TEST_CATALOG}'
+);
+
+statement ok
+ATTACH '' AS db (TYPE databricks, SECRET dbx, SCHEMA '${DATABRICKS_TEST_SCHEMA}');
+
+statement ok
+CREATE TABLE db.changes (id INTEGER, region VARCHAR);
+
+statement ok
+INSERT INTO db.changes VALUES (1, 'east'), (2, 'west');
+
+query I
+UPDATE db.changes SET region = 'south' WHERE id = 1;
+----
+1
+
+query I
+SELECT region FROM db.changes WHERE id = 1;
+----
+south
+
+query I
+DELETE FROM db.changes WHERE id = 2;
+----
+1
+
+query I
+SELECT count(*) FROM db.changes;
+----
+1
+
+statement ok
+TRUNCATE TABLE db.changes;
+
+query I
+SELECT count(*) FROM db.changes;
+----
+0
+
+statement ok
+DROP TABLE db.changes;

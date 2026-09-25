@@ -12,7 +12,7 @@ public:
 	//! True when a filter on this column can be sent to Databricks and not re-checked locally.
 	static bool SupportsFilterPushdown(const DatabricksColumn &column);
 	//! WHERE body. Empty when no pushed filter restricts rows.
-	//! filters is keyed by position in column_ids. Use the static filter set, not dynamic join hints.
+	//! filters is keyed by the table column id. Use the static filter set, not dynamic join hints.
 	static string TransformFilters(const vector<column_t> &column_ids, optional_ptr<TableFilterSet> filters,
 	                               const vector<DatabricksColumn> &columns);
 	//! Empty for optional, dynamic, and bloom filters. Throws when a required filter cannot be translated.
@@ -22,6 +22,8 @@ public:
 	//! Returns false when the expression must stay in DuckDB.
 	static bool TryTranslateExpression(const vector<DatabricksColumn> &columns, const LogicalGet &get, Expression &expr,
 	                                   string &sql);
+	//! One Databricks expression for UPDATE and DELETE. Throws when the expression cannot be sent.
+	static string TranslateDml(const LogicalGet &get, const Expression &expr);
 };
 
 } // namespace duckdb
