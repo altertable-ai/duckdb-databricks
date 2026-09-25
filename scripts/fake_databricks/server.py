@@ -59,7 +59,7 @@ def column_array(name, rows):
         return pa.array([row["cancels"] for row in rows], type=pa.int64()), "cancels"
     if name == "n":
         return pa.array([row["n"] for row in rows], type=pa.int32()), "n"
-    raise ValueError(f"unknown column {name}")
+    return pa.array([row.get(name) for row in rows], type=pa.string()), name
 
 
 def table_for(names, rows):
@@ -128,6 +128,8 @@ class ServerState:
         self.seen_429 = set()
         self.seen_503 = set()
         self.seen_401 = set()
+        self.schemas = {"sales", "default", "information_schema"}
+        self.tables = {}
 
     def base(self):
         return f"http://{HOST}:{self.port}"
@@ -159,6 +161,171 @@ def json_table(columns, rows):
     }
 
 
+def qualified_table(sql):
+    match = re.search(r"(?:FROM|INTO|TABLE|SCHEMA)\s+`([^`]+)`\.`([^`]+)`(?:\.`([^`]+)`)?", sql, re.I)
+    if not match:
+        return None
+    if match.group(3):
+        return match.group(2), match.group(3)
+    return match.group(2), None
+
+
+def parse_tuples(body):
+    tuples = []
+    i = 0
+    while i < len(body):
+        while i < len(body) and body[i] in " \t\r\n,":
+            i += 1
+        if i >= len(body) or body[i] != "(":
+            break
+        i += 1
+        values = []
+        current = []
+        quote = None
+        depth = 1
+        while i < len(body) and depth:
+            ch = body[i]
+            if quote:
+                current.append(ch)
+                if ch == "\\" and i + 1 < len(body):
+                    current.append(body[i + 1])
+                    i += 2
+                    continue
+                if ch == quote:
+                    quote = None
+                i += 1
+                continue
+            if ch == "'":
+                quote = ch
+                current.append(ch)
+                i += 1
+                continue
+            if ch == "(":
+                depth += 1
+                current.append(ch)
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    values.append("".join(current).strip())
+                    tuples.append(values)
+                    i += 1
+                    break
+                current.append(ch)
+            elif ch == "," and depth == 1:
+                values.append("".join(current).strip())
+                current = []
+            else:
+                current.append(ch)
+            i += 1
+    return tuples
+
+
+def literal_to_python(text):
+    text = text.strip()
+    if text.upper() == "NULL" or text.upper().startswith("CAST(NULL"):
+        return None
+    if text.startswith("'") or text.startswith("DATE'") or text.startswith("TIMESTAMP"):
+        quoted = text[text.find("'") :]
+        return unquote_sql(quoted)
+    if text.endswith("BD"):
+        return Decimal(text[:-2])
+    if re.fullmatch(r"-?\d+", text):
+        return int(text)
+    return text
+
+
+def apply_statement(sql):
+    upper = sql.lstrip().upper()
+    if upper.startswith("CREATE SCHEMA"):
+        match = re.search(r"CREATE SCHEMA(?: IF NOT EXISTS)? `[^`]+`\.`([^`]+)`", sql, re.I)
+        if match:
+            STATE.schemas.add(match.group(1))
+        return
+    if upper.startswith("DROP SCHEMA"):
+        match = re.search(r"DROP SCHEMA(?: IF EXISTS)? `[^`]+`\.`([^`]+)`", sql, re.I)
+        if match and match.group(1) not in ("sales", "default", "information_schema"):
+            STATE.schemas.discard(match.group(1))
+            STATE.tables = {key: value for key, value in STATE.tables.items() if key[0] != match.group(1)}
+        return
+    if upper.startswith("CREATE ") and "TABLE" in upper.split("TBLPROPERTIES", 1)[0]:
+        match = re.search(
+            r"CREATE(?: OR REPLACE)? TABLE(?: IF NOT EXISTS)? `[^`]+`\.`([^`]+)`\.`([^`]+)`\s*\(",
+            sql,
+            re.I,
+        )
+        if not match:
+            return
+        schema, table = match.group(1), match.group(2)
+        body_start = sql.find("(", match.end() - 1)
+        props = sql.upper().find("TBLPROPERTIES")
+        end = sql.rfind(")", body_start, props if props > 0 else len(sql))
+        body = sql[body_start + 1 : end]
+        columns = []
+        for part in split_top(body, ","):
+            part = part.strip()
+            if not part or part.upper().startswith("CONSTRAINT"):
+                continue
+            col = re.match(r"`([^`]+)`\s+(.+)", part)
+            if not col:
+                continue
+            nullable = "NO" if "NOT NULL" in part.upper() else "YES"
+            default = None
+            default_at = part.upper().find(" DEFAULT ")
+            if default_at >= 0:
+                default = part[default_at + len(" DEFAULT ") :].strip()
+            type_text = col.group(2)
+            for marker in (" NOT NULL", " DEFAULT "):
+                at = type_text.upper().find(marker)
+                if at >= 0:
+                    type_text = type_text[:at]
+            columns.append((col.group(1), type_text.strip(), nullable, default))
+        STATE.tables[(schema, table)] = {"columns": columns, "rows": []}
+        STATE.schemas.add(schema)
+        return
+    if upper.startswith("DROP TABLE"):
+        located = qualified_table(sql)
+        if located and located[1]:
+            STATE.tables.pop(located, None)
+        return
+    if upper.startswith("INSERT INTO"):
+        located = qualified_table(sql)
+        if not located or not located[1]:
+            return
+        values_at = sql.upper().find(" VALUES ")
+        if values_at < 0:
+            return
+        columns_at = sql.find("(")
+        column_body = sql[columns_at + 1 : sql.find(")", columns_at)]
+        columns = [part.strip().strip("`") for part in split_top(column_body, ",")]
+        rows = []
+        for values in parse_tuples(sql[values_at + len(" VALUES ") :]):
+            row = {column: literal_to_python(value) for column, value in zip(columns, values)}
+            rows.append(row)
+        if located[1].lower() == "orders" and located[0].lower() == "sales":
+            for row in rows:
+                ORDERS.append(
+                    {
+                        "id": row.get("id"),
+                        "region": row.get("region"),
+                        "amount": row.get("amount"),
+                        "note": row.get("note"),
+                    }
+                )
+            return
+        table = STATE.tables.get(located)
+        if table is not None:
+            for row in rows:
+                filled = {}
+                for column_name, _type_text, _nullable, default in table["columns"]:
+                    if column_name in row:
+                        filled[column_name] = row[column_name]
+                    elif default:
+                        filled[column_name] = literal_to_python(default)
+                    else:
+                        filled[column_name] = None
+                table["rows"].append(filled)
+
+
 def metadata_result(sql, parameters):
     params = {item.get("name"): item.get("value") for item in parameters}
     lower = sql.lower()
@@ -167,13 +334,14 @@ def metadata_result(sql, parameters):
         rows = [[catalog]] if catalog == "main" else []
         return json_table([("catalog_name", "STRING")], rows)
     if "information_schema.schemata" in lower:
-        return json_table(
-            [("schema_name", "STRING"), ("comment", "STRING")],
-            [["sales", None], ["information_schema", None], ["default", None]],
-        )
+        rows = [[name, None] for name in sorted(STATE.schemas)]
+        return json_table([("schema_name", "STRING"), ("comment", "STRING")], rows)
     if "information_schema.tables" in lower:
         schema = params.get("schema", "")
         rows = [["orders", "TABLE", None]] if schema == "sales" else []
+        for (table_schema, table_name), _table in STATE.tables.items():
+            if table_schema == schema:
+                rows.append([table_name, "TABLE", None])
         return json_table([("table_name", "STRING"), ("table_type", "STRING"), ("comment", "STRING")], rows)
     if "information_schema.columns" in lower:
         schema = params.get("schema", "")
@@ -185,6 +353,11 @@ def metadata_result(sql, parameters):
                 ["orders", "amount", 2, "DECIMAL(10,2)", "YES", None, None],
                 ["orders", "note", 3, "VARIANT", "YES", None, None],
             ]
+        for (table_schema, table_name), table in STATE.tables.items():
+            if table_schema != schema:
+                continue
+            for position, (column_name, type_text, nullable, default) in enumerate(table["columns"]):
+                rows.append([table_name, column_name, position, type_text, nullable, default, None])
         return json_table(
             [
                 ("table_name", "STRING"),
@@ -218,7 +391,7 @@ def arrow_schema(names):
     }
     columns = []
     for index, name in enumerate(names):
-        type_text, field = mapping[name]
+        type_text, field = mapping.get(name, ("STRING", name))
         columns.append(
             {"name": field, "type_text": type_text, "type_name": type_text.split("(")[0], "position": index}
         )
@@ -468,6 +641,13 @@ def scan_payloads(sql):
         names = ["token_requests", "http_429", "http_503", "cancels"]
         return names, [table_for(names, row)]
     names, from_orders = parse_select(sql)
+    located = qualified_table(sql)
+    if located and located[1] and not (located[0].lower() == "sales" and located[1].lower() == "orders"):
+        table = STATE.tables.get(located)
+        rows = apply_query(sql, list(table["rows"]) if table else [])
+        if rows and names == ["const1"]:
+            rows = [{} for _ in rows]
+        return names, ([table_for(names, rows)] if rows else [])
     source = ORDERS if from_orders else [{"n": 1}]
     if not from_orders and names == ["n"]:
         rows = source
@@ -615,6 +795,7 @@ class Handler(BaseHTTPRequestHandler):
         sql = body.get("statement", "")
         with STATE.lock:
             STATE.recorded.append(sql)
+            apply_statement(sql)
             if "__429__" in sql and sql not in STATE.seen_429:
                 STATE.seen_429.add(sql)
                 STATE.http_429 += 1

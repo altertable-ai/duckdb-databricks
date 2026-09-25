@@ -1,8 +1,11 @@
 #include "storage/databricks_schema_entry.hpp"
 
+#include "databricks_ddl.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
+#include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
+#include "storage/databricks_catalog.hpp"
 
 namespace duckdb {
 
@@ -16,9 +19,9 @@ DatabricksSchemaEntry::DatabricksSchemaEntry(Catalog &catalog, CreateSchemaInfo 
 
 optional_ptr<CatalogEntry> DatabricksSchemaEntry::CreateTable(CatalogTransaction transaction,
                                                               BoundCreateTableInfo &info) {
-	(void)transaction;
-	(void)info;
-	ThrowUseExecute("CREATE TABLE");
+	auto &dbx_catalog = catalog.Cast<DatabricksCatalog>();
+	DatabricksDdl::CreateTable(transaction.GetContext(), dbx_catalog, name, info.Base());
+	return LookupEntry(transaction, EntryLookupInfo(CatalogType::TABLE_ENTRY, info.Base().table));
 }
 optional_ptr<CatalogEntry> DatabricksSchemaEntry::CreateFunction(CatalogTransaction, CreateFunctionInfo &) {
 	ThrowUseExecute("Functions and macros");
@@ -48,11 +51,17 @@ optional_ptr<CatalogEntry> DatabricksSchemaEntry::CreateCollation(CatalogTransac
 optional_ptr<CatalogEntry> DatabricksSchemaEntry::CreateType(CatalogTransaction, CreateTypeInfo &) {
 	ThrowUseExecute("Types");
 }
-void DatabricksSchemaEntry::Alter(CatalogTransaction, AlterInfo &) {
-	ThrowUseExecute("ALTER TABLE");
+void DatabricksSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
+	if (info.type != AlterType::ALTER_TABLE) {
+		ThrowUseExecute("ALTER");
+	}
+	DatabricksDdl::Alter(transaction.GetContext(), catalog.Cast<DatabricksCatalog>(), info);
 }
-void DatabricksSchemaEntry::DropEntry(ClientContext &, DropInfo &info) {
-	ThrowUseExecute("DROP " + CatalogTypeToString(info.type));
+void DatabricksSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
+	if (info.type != CatalogType::TABLE_ENTRY) {
+		ThrowUseExecute("DROP " + CatalogTypeToString(info.type));
+	}
+	DatabricksDdl::DropTable(context, catalog.Cast<DatabricksCatalog>(), info);
 }
 
 void DatabricksSchemaEntry::Scan(ClientContext &context, CatalogType type,

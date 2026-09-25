@@ -1,0 +1,99 @@
+# name: test/sql/fake/write.test
+# description: inserts and DDL against the fake statement API
+# group: [fake]
+
+require-env FAKE_DATABRICKS_PORT
+
+require databricks
+
+set ignore_error_messages __no_such_error__
+
+statement ok
+CREATE SECRET dbx (TYPE databricks, HOST 'http://127.0.0.1:${FAKE_DATABRICKS_PORT}', WAREHOUSE_ID 'wh', TOKEN 'pat');
+
+statement ok
+ATTACH 'main' AS db (TYPE databricks, SECRET dbx, SCHEMA 'sales');
+
+statement ok
+CREATE SCHEMA db.extra;
+
+statement ok
+CREATE TABLE db.widgets (id INTEGER NOT NULL PRIMARY KEY, name VARCHAR DEFAULT 'x');
+
+query I
+SELECT count(*) > 0 FROM databricks_query('db', '__recorded__') WHERE contains(statement, 'delta.columnMapping.mode') AND contains(statement, 'allowColumnDefaults') AND contains(statement, 'PRIMARY KEY') AND contains(statement, 'NOT NULL');
+----
+true
+
+query I
+SELECT count(*) FROM db.widgets;
+----
+0
+
+statement ok
+INSERT INTO db.widgets (id) VALUES (1);
+
+query I
+SELECT name FROM db.widgets;
+----
+x
+
+statement ok
+INSERT INTO db.widgets (id, name) VALUES (4, 'north'), (5, 'a''b');
+
+query I
+SELECT name FROM db.widgets WHERE id = 4;
+----
+north
+
+query I
+SELECT name FROM db.widgets WHERE id = 5;
+----
+a'b
+
+query I
+SELECT count(*) > 0 FROM databricks_query('db', '__recorded__') WHERE contains(statement, 'INSERT INTO `main`.`sales`.`widgets`') AND contains(statement, e'a\\\'b');
+----
+true
+
+statement ok
+SET dbx_insert_max_statement_bytes=80;
+
+statement ok
+INSERT INTO db.widgets (id, name) VALUES (6, 'east'), (7, 'west');
+
+query I
+SELECT count(*) FROM databricks_query('db', '__recorded__') WHERE contains(statement, '(6,') AND NOT contains(statement, '(7,');
+----
+1
+
+query I
+SELECT count(*) FROM databricks_query('db', '__recorded__') WHERE contains(statement, '(7,') AND NOT contains(statement, '(6,');
+----
+1
+
+statement error
+INSERT INTO db.widgets (id, name) VALUES (8, 'abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz');
+----
+dbx_insert_max_statement_bytes
+
+statement error
+INSERT INTO db.widgets (id) VALUES (1) RETURNING id;
+----
+MERGE
+
+statement ok
+ATTACH 'main' AS ro (TYPE databricks, SECRET dbx, SCHEMA 'sales', READ_ONLY);
+
+statement error
+INSERT INTO ro.widgets (id) VALUES (9);
+----
+read-only
+
+statement ok
+DROP TABLE db.widgets;
+
+statement error
+SELECT * FROM db.widgets;
+----
+does not exist

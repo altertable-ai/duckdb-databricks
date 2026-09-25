@@ -48,7 +48,11 @@ Cannot write to a read-only Databricks database
 
 `databricks_clear_cache` clears every attached Databricks database.
 
-Schema, table, and column metadata is cached on the attached database until then. `INSERT`, `UPDATE`, `DELETE`, and `CREATE TABLE` from DuckDB syntax are not available yet; send those statements with `databricks_execute`.
+Schema, table, and column metadata is cached on the attached database until `databricks_execute`, `databricks_clear_cache`, or a DDL statement clears it.
+
+`INSERT`, `COPY`, and `CREATE TABLE AS` send batched `INSERT … VALUES` statements. Each batch commits on its own. If a later batch fails, the batches already sent stay written. An insert that fits in one batch is atomic. `ROLLBACK` after a write does not undo it.
+
+`UPDATE` and `DELETE` from DuckDB syntax are not available yet; send those statements with `databricks_execute`.
 
 Filters, `LIMIT`, and `ORDER BY ... LIMIT` are sent to the warehouse when `dbx_filter_pushdown` and `dbx_order_pushdown` are on. A pushed filter is not checked again in DuckDB. `FLOAT` and `DOUBLE` comparisons, collated strings, and `JSON` stay in DuckDB. `EXPLAIN` shows a pushed `ORDER BY` or `LIMIT` as `Pushed Down`. `EXPLAIN ANALYZE` shows the statement text as `SQL`.
 

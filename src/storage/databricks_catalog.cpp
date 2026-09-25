@@ -14,7 +14,10 @@
 #include "duckdb/planner/operator/logical_merge_into.hpp"
 #include "duckdb/planner/operator/logical_update.hpp"
 #include "duckdb/storage/database_size.hpp"
+#include "databricks_ddl.hpp"
+#include "storage/databricks_insert.hpp"
 #include "storage/databricks_schema_entry.hpp"
+#include "storage/databricks_table_entry.hpp"
 #include "storage/databricks_transaction.hpp"
 
 namespace duckdb {
@@ -76,12 +79,13 @@ void DatabricksCatalog::Initialize(bool load_builtin) {
 	(void)load_builtin;
 }
 
-optional_ptr<CatalogEntry> DatabricksCatalog::CreateSchema(CatalogTransaction, CreateSchemaInfo &) {
-	throw NotImplementedException("CREATE SCHEMA is not supported for Databricks databases; use databricks_execute()");
+optional_ptr<CatalogEntry> DatabricksCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
+	DatabricksDdl::CreateSchema(transaction.GetContext(), *this, info);
+	return schemas.GetEntry(transaction.GetContext(), info.schema);
 }
 
-void DatabricksCatalog::DropSchema(ClientContext &, DropInfo &) {
-	throw NotImplementedException("DROP SCHEMA is not supported for Databricks databases; use databricks_execute()");
+void DatabricksCatalog::DropSchema(ClientContext &context, DropInfo &info) {
+	DatabricksDdl::DropSchema(context, *this, info);
 }
 
 void DatabricksCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) {
@@ -124,13 +128,34 @@ shared_ptr<CatalogEntry> DatabricksCatalog::GetSchemaEntryOwner(const string &na
 	throw NotImplementedException("%s is not supported for Databricks tables; use databricks_execute()", statement);
 }
 
-PhysicalOperator &DatabricksCatalog::PlanCreateTableAs(ClientContext &, PhysicalPlanGenerator &, LogicalCreateTable &,
-                                                       PhysicalOperator &) {
-	ThrowWriteNotImplemented("CREATE TABLE AS");
+PhysicalOperator &DatabricksCatalog::PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
+                                                       LogicalCreateTable &op, PhysicalOperator &plan) {
+	(void)context;
+	ThrowIfReadOnly();
+	auto create_info = unique_ptr_cast<CreateInfo, CreateTableInfo>(std::move(op.info->base));
+	auto &insert = planner.Make<DatabricksInsert>(op, *this, op.schema.name, std::move(create_info));
+	insert.children.push_back(plan);
+	return insert;
 }
-PhysicalOperator &DatabricksCatalog::PlanInsert(ClientContext &, PhysicalPlanGenerator &, LogicalInsert &,
-                                                optional_ptr<PhysicalOperator>) {
-	ThrowWriteNotImplemented("INSERT");
+PhysicalOperator &DatabricksCatalog::PlanInsert(ClientContext &, PhysicalPlanGenerator &planner, LogicalInsert &op,
+                                                optional_ptr<PhysicalOperator> plan) {
+	ThrowIfReadOnly();
+	if (op.return_chunk) {
+		throw NotImplementedException(
+		    "RETURNING is not supported for Databricks tables; use databricks_execute() with MERGE");
+	}
+	if (op.on_conflict_info.action_type != OnConflictAction::THROW) {
+		throw NotImplementedException(
+		    "ON CONFLICT is not supported for Databricks tables; use databricks_execute() with MERGE");
+	}
+	if (!plan) {
+		throw NotImplementedException("INSERT is not supported for Databricks tables; use databricks_execute()");
+	}
+	auto &table = op.table.Cast<DatabricksTableEntry>();
+	auto columns = DatabricksInsert::GetInsertColumns(table, op.column_index_map);
+	auto &insert = planner.Make<DatabricksInsert>(op, table, std::move(columns));
+	insert.children.push_back(*plan);
+	return insert;
 }
 PhysicalOperator &DatabricksCatalog::PlanDelete(ClientContext &, PhysicalPlanGenerator &, LogicalDelete &) {
 	ThrowWriteNotImplemented("DELETE");
