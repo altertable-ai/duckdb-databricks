@@ -1,13 +1,21 @@
 #include "databricks_scanner.hpp"
 
 #include "databricks_arrow.hpp"
+#include "databricks_expression.hpp"
 #include "databricks_utils.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/table_column.hpp"
+#include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/function/table/arrow.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/database.hpp"
+#include "duckdb/planner/expression/bound_between_expression.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
 
 #include <algorithm>
 
@@ -25,16 +33,23 @@ unique_ptr<FunctionData> DatabricksScanBindData::Copy() const {
 	result->columns = columns;
 	result->table_entry = table_entry;
 	result->lifetime = lifetime;
+	result->filter_pushdown = filter_pushdown;
+	result->extra_filter = extra_filter;
+	result->order_by_clause = order_by_clause;
+	result->limit_clause = limit_clause;
 	return std::move(result);
 }
 
 bool DatabricksScanBindData::Equals(const FunctionData &other_p) const {
 	auto &other = other_p.Cast<DatabricksScanBindData>();
 	return session == other.session && catalog == other.catalog && schema == other.schema && table == other.table &&
-	       query == other.query && executed == other.executed;
+	       query == other.query && executed == other.executed && filter_pushdown == other.filter_pushdown &&
+	       order_by_clause == other.order_by_clause && limit_clause == other.limit_clause &&
+	       extra_filter == other.extra_filter;
 }
 
-string DatabricksScanFunction::BuildQuery(const DatabricksScanBindData &bind_data, const vector<column_t> &column_ids) {
+string DatabricksScanFunction::BuildQuery(const DatabricksScanBindData &bind_data, const vector<column_t> &column_ids,
+                                          optional_ptr<TableFilterSet> filters) {
 	bool only_virtual = column_ids.empty();
 	vector<string> select_list;
 	for (auto column_id : column_ids) {
@@ -60,8 +75,24 @@ string DatabricksScanFunction::BuildQuery(const DatabricksScanBindData &bind_dat
 	if (select_list.empty() || only_virtual) {
 		select_list = {"1"};
 	}
-	return "SELECT " + StringUtil::Join(select_list, ", ") + " FROM " +
-	       DatabricksQualifiedName(bind_data.catalog, bind_data.schema, bind_data.table);
+	auto sql = "SELECT " + StringUtil::Join(select_list, ", ") + " FROM " +
+	           DatabricksQualifiedName(bind_data.catalog, bind_data.schema, bind_data.table);
+	vector<string> predicates;
+	if (bind_data.filter_pushdown && filters) {
+		auto where = DatabricksExpressions::TransformFilters(column_ids, filters, bind_data.columns);
+		if (!where.empty()) {
+			predicates.push_back(where);
+		}
+	}
+	if (bind_data.filter_pushdown && !bind_data.extra_filter.empty()) {
+		predicates.push_back(bind_data.extra_filter);
+	}
+	if (!predicates.empty()) {
+		sql += " WHERE " + StringUtil::Join(predicates, " AND ");
+	}
+	sql += bind_data.order_by_clause;
+	sql += bind_data.limit_clause;
+	return sql;
 }
 
 namespace {
@@ -71,10 +102,12 @@ struct DatabricksScanGlobalState : public GlobalTableFunctionState {
 	DatabricksStatementResult result;
 	atomic<idx_t> next_chunk {0};
 	vector<column_t> column_ids;
+	vector<idx_t> projection_ids;
 	string sql;
+	idx_t max_threads = 1;
 
 	idx_t MaxThreads() const override {
-		return 1;
+		return max_threads;
 	}
 };
 
@@ -86,19 +119,32 @@ struct DatabricksScanLocalState : public LocalTableFunctionState {
 	bool exhausted = false;
 };
 
+optional_ptr<TableFilterSet> StaticScanFilters(TableFunctionInitInput &input) {
+	if (input.op) {
+		return input.op->Cast<PhysicalTableScan>().table_filters.get();
+	}
+	return input.filters;
+}
+
 unique_ptr<GlobalTableFunctionState> ScanInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->CastNoConst<DatabricksScanBindData>();
 	auto result = make_uniq<DatabricksScanGlobalState>();
 	result->session = bind_data.session;
 	result->column_ids = input.column_ids;
+	result->projection_ids = input.projection_ids;
 	if (bind_data.executed) {
 		result->result = bind_data.result;
 		result->sql = bind_data.query;
-		return std::move(result);
+	} else {
+		result->sql = DatabricksScanFunction::BuildQuery(bind_data, input.column_ids, StaticScanFilters(input));
+		result->result = bind_data.session->Execute(context, DatabricksStatementMode::SCAN, result->sql,
+		                                            bind_data.catalog, bind_data.schema, {});
 	}
-	result->sql = DatabricksScanFunction::BuildQuery(bind_data, input.column_ids);
-	result->result = bind_data.session->Execute(context, DatabricksStatementMode::SCAN, result->sql, bind_data.catalog,
-	                                            bind_data.schema, {});
+	auto chunks = std::max(result->result.total_chunk_count, idx_t(1));
+	if (bind_data.order_by_clause.empty()) {
+		auto threads = std::max(context.db->NumberOfThreads(), idx_t(1));
+		result->max_threads = std::min(chunks, threads);
+	}
 	return std::move(result);
 }
 
@@ -175,10 +221,12 @@ void ScanFunction(ClientContext &context, TableFunctionInput &data, DataChunk &o
 		local.arrow_state = make_uniq<ArrowScanLocalState>(std::move(wrapper), context);
 		if (!bind_data.query.empty()) {
 			local.arrow_state->column_ids = global.column_ids;
+		} else if (!global.projection_ids.empty()) {
+			local.arrow_state->column_ids = global.projection_ids;
 		}
 	}
 	local.arrow_state->chunk_offset = local.offset;
-	auto projected = bind_data.query.empty();
+	auto projected = bind_data.query.empty() && global.projection_ids.empty();
 	ArrowTableFunction::ArrowToDuckDB(*local.arrow_state, batch.schema.GetColumns(), output, projected,
 	                                  COLUMN_IDENTIFIER_ROW_ID);
 	local.offset += count;
@@ -197,7 +245,98 @@ InsertionOrderPreservingMap<string> ScanToString(TableFunctionToStringInput &inp
 	} else {
 		result["Query"] = bind_data.query;
 	}
+	auto pushed = bind_data.order_by_clause + bind_data.limit_clause;
+	StringUtil::Trim(pushed);
+	if (!pushed.empty()) {
+		result["Pushed Down"] = pushed;
+	}
 	return result;
+}
+
+InsertionOrderPreservingMap<string> ScanDynamicToString(TableFunctionDynamicToStringInput &input) {
+	InsertionOrderPreservingMap<string> result;
+	if (input.global_state) {
+		result["SQL"] = input.global_state->Cast<DatabricksScanGlobalState>().sql;
+	}
+	return result;
+}
+
+bool SupportsPushdownType(const FunctionData &bind_data_p, idx_t column_index) {
+	auto &bind_data = bind_data_p.Cast<DatabricksScanBindData>();
+	if (!bind_data.filter_pushdown || column_index >= bind_data.columns.size()) {
+		return false;
+	}
+	return DatabricksExpressions::SupportsFilterPushdown(bind_data.columns[column_index]);
+}
+
+static bool IsPrefixLikePattern(const string &pattern) {
+	if (pattern.empty() || pattern.back() != '%' || pattern.size() == 1) {
+		return false;
+	}
+	auto prefix = pattern.substr(0, pattern.size() - 1);
+	return prefix.find('%') == string::npos && prefix.find('_') == string::npos;
+}
+
+void PushdownComplexFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data_p,
+                           vector<unique_ptr<Expression>> &filters) {
+	(void)context;
+	if (!bind_data_p) {
+		return;
+	}
+	auto &bind_data = bind_data_p->Cast<DatabricksScanBindData>();
+	if (!bind_data.filter_pushdown) {
+		return;
+	}
+	vector<unique_ptr<Expression>> remaining;
+	vector<string> parts;
+	for (auto &filter : filters) {
+		string sql;
+		if (DatabricksExpressions::TryTranslateExpression(bind_data.columns, get, *filter, sql)) {
+			parts.push_back(sql);
+		} else {
+			remaining.push_back(std::move(filter));
+		}
+	}
+	filters = std::move(remaining);
+	if (!parts.empty()) {
+		if (!bind_data.extra_filter.empty()) {
+			bind_data.extra_filter += " AND ";
+		}
+		bind_data.extra_filter += StringUtil::Join(parts, " AND ");
+	}
+}
+
+bool PushdownExpression(ClientContext &context, const LogicalGet &get, Expression &expr) {
+	(void)context;
+	if (!get.bind_data) {
+		return false;
+	}
+	auto &bind_data = get.bind_data->Cast<DatabricksScanBindData>();
+	if (!bind_data.filter_pushdown) {
+		return false;
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_BETWEEN) {
+		auto &between = expr.Cast<BoundBetweenExpression>();
+		return between.input->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+		       between.lower->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT &&
+		       between.upper->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT;
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+		auto &func = expr.Cast<BoundFunctionExpression>();
+		if (func.function.name != "~~" || func.children.size() < 2) {
+			return false;
+		}
+		if (func.children[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
+		    func.children[1]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+			return false;
+		}
+		auto &constant = func.children[1]->Cast<BoundConstantExpression>();
+		if (constant.value.IsNull() || constant.value.type().id() != LogicalTypeId::VARCHAR) {
+			return false;
+		}
+		return IsPrefixLikePattern(StringValue::Get(constant.value));
+	}
+	return false;
 }
 
 BindInfo GetBindInfo(const optional_ptr<FunctionData> bind_data_p) {
@@ -223,8 +362,14 @@ void DatabricksScanFunction::SetScanCallbacks(TableFunction &function) {
 	function.init_local = ScanInitLocal;
 	function.function = ScanFunction;
 	function.to_string = ScanToString;
+	function.dynamic_to_string = ScanDynamicToString;
 	function.get_bind_info = GetBindInfo;
 	function.projection_pushdown = true;
+	function.filter_pushdown = true;
+	function.filter_prune = true;
+	function.supports_pushdown_type = SupportsPushdownType;
+	function.pushdown_complex_filter = PushdownComplexFilter;
+	function.pushdown_expression = PushdownExpression;
 	function.get_virtual_columns = GetVirtualColumns;
 }
 

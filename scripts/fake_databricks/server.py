@@ -7,6 +7,7 @@ __403__, __multi__, __slow__, __recorded__, __stats__.
 """
 
 import json
+import re
 import threading
 import uuid
 from decimal import Decimal
@@ -244,6 +245,213 @@ def make_links(statement_id, chunk_index, payload, expired=False, forbidden=Fals
     ]
 
 
+def split_top(pred, sep):
+    parts = []
+    depth = 0
+    quote = None
+    current = []
+    i = 0
+    while i < len(pred):
+        ch = pred[i]
+        if quote:
+            current.append(ch)
+            if ch == "\\" and quote == "'" and i + 1 < len(pred):
+                current.append(pred[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "'`":
+            quote = ch
+            current.append(ch)
+            i += 1
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if depth == 0 and pred[i : i + len(sep)].upper() == sep.upper():
+            parts.append("".join(current).strip())
+            current = []
+            i += len(sep)
+            continue
+        current.append(ch)
+        i += 1
+    tail = "".join(current).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def unquote_sql(text):
+    text = text.strip()
+    if len(text) >= 2 and text[0] == "'" and text[-1] == "'":
+        body = text[1:-1]
+        return body.replace("\\'", "'").replace("\\\\", "\\")
+    if text.upper().endswith("BD"):
+        text = text[:-2]
+    return text
+
+
+def cell_value(row, name):
+    if name not in row:
+        raise ValueError(f"unknown filter column {name}")
+    return row[name]
+
+
+def compare_values(left, op, right_text):
+    if left is None:
+        return False
+    literal = unquote_sql(right_text)
+    if isinstance(left, str):
+        right = literal
+    else:
+        right = type(left)(literal) if not isinstance(left, float) else float(literal)
+        if isinstance(left, int) and not isinstance(left, bool):
+            right = int(float(literal))
+    if op == "=":
+        return left == right
+    if op in ("!=", "<>"):
+        return left != right
+    if op == "<":
+        return left < right
+    if op == ">":
+        return left > right
+    if op == "<=":
+        return left <= right
+    if op == ">=":
+        return left >= right
+    raise ValueError(f"unknown comparison {op}")
+
+
+def eval_cmp(row, pred):
+    pred = pred.strip()
+    if pred == "1 = 0":
+        return False
+    match = re.match(r"^`([^`]+)`\s+IS\s+NOT\s+NULL$", pred, re.I)
+    if match:
+        return cell_value(row, match.group(1)) is not None
+    match = re.match(r"^`([^`]+)`\s+IS\s+NULL$", pred, re.I)
+    if match:
+        return cell_value(row, match.group(1)) is None
+    match = re.match(r"^`([^`]+)`\s+NOT\s+IN\s*\((.*)\)$", pred, re.I)
+    if match:
+        return not any(compare_values(cell_value(row, match.group(1)), "=", item) for item in split_top(match.group(2), ","))
+    match = re.match(r"^`([^`]+)`\s+IN\s*\((.*)\)$", pred, re.I)
+    if match:
+        return any(compare_values(cell_value(row, match.group(1)), "=", item) for item in split_top(match.group(2), ","))
+    match = re.match(r"^`([^`]+)`\s+BETWEEN\s+(.+?)\s+AND\s+(.+)$", pred, re.I)
+    if match:
+        value = cell_value(row, match.group(1))
+        return compare_values(value, ">=", match.group(2)) and compare_values(value, "<=", match.group(3))
+    match = re.match(r"^`([^`]+)`\s+LIKE\s+('.+')\s+ESCAPE\s+('.+')$", pred, re.I)
+    if match:
+        value = cell_value(row, match.group(1))
+        if value is None:
+            return False
+        pattern = unquote_sql(match.group(2))
+        if not pattern.endswith("%") or "_" in pattern[:-1] or "%" in pattern[:-1]:
+            raise ValueError(f"unsupported LIKE {pred}")
+        return str(value).startswith(pattern[:-1])
+    match = re.match(r"^`([^`]+)`\s*(=|!=|<>|>=|<=|>|<)\s*(.+)$", pred)
+    if match:
+        return compare_values(cell_value(row, match.group(1)), match.group(2), match.group(3))
+    raise ValueError(f"unsupported predicate {pred}")
+
+
+def eval_pred(row, pred):
+    pred = pred.strip()
+    while pred.startswith("(") and pred.endswith(")") and len(split_top(pred[1:-1], " OR ")) >= 1:
+        inner = pred[1:-1].strip()
+        if inner.count("(") == inner.count(")"):
+            pred = inner
+            continue
+        break
+    if re.match(r"^`[^`]+`\s+BETWEEN\s+.+\s+AND\s+.+$", pred, re.I):
+        return eval_cmp(row, pred)
+    ors = split_top(pred, " OR ")
+    if len(ors) > 1:
+        return any(eval_pred(row, part) for part in ors)
+    ands = split_top(pred, " AND ")
+    if len(ands) > 1:
+        return all(eval_pred(row, part) for part in ands)
+    return eval_cmp(row, pred)
+
+
+def clause_span(sql):
+    upper = sql.upper()
+    where_at = upper.find(" WHERE ")
+    order_at = upper.find(" ORDER BY ")
+    limit_at = upper.find(" LIMIT ")
+    pred = ""
+    if where_at >= 0:
+        end = len(sql)
+        for marker in (order_at, limit_at):
+            if marker > where_at:
+                end = min(end, marker)
+        pred = sql[where_at + len(" WHERE ") : end].strip()
+    order_keys = []
+    if order_at >= 0:
+        end = limit_at if limit_at > order_at else len(sql)
+        body = sql[order_at + len(" ORDER BY ") : end]
+        for key in split_top(body, ","):
+            match = re.match(r"`([^`]+)`\s*(ASC|DESC)?\s*(NULLS FIRST|NULLS LAST)?", key.strip(), re.I)
+            if not match:
+                raise ValueError(f"unsupported ORDER BY {key}")
+            order_keys.append(
+                (
+                    match.group(1),
+                    (match.group(2) or "ASC").upper() == "DESC",
+                    (match.group(3) or "").upper() == "NULLS FIRST",
+                )
+            )
+    limit = None
+    offset = 0
+    if limit_at >= 0:
+        match = re.search(r"LIMIT\s+(\d+)(?:\s+OFFSET\s+(\d+))?", sql[limit_at:], re.I)
+        if not match:
+            raise ValueError(f"unsupported LIMIT in {sql}")
+        limit = int(match.group(1))
+        if match.group(2):
+            offset = int(match.group(2))
+    return pred, order_keys, limit, offset
+
+
+def apply_query(sql, rows):
+    pred, order_keys, limit, offset = clause_span(sql)
+    if pred:
+        rows = [row for row in rows if eval_pred(row, pred)]
+    if order_keys:
+
+        class _Reverse:
+            def __init__(self, value):
+                self.value = value
+
+            def __lt__(self, other):
+                return self.value > other.value
+
+        def sort_key(row):
+            key = []
+            for name, descending, nulls_first in order_keys:
+                value = cell_value(row, name)
+                missing = value is None
+                key.append(0 if missing == nulls_first else 1)
+                if missing:
+                    key.append(0)
+                elif descending:
+                    key.append(_Reverse(value))
+                else:
+                    key.append(value)
+            return key
+
+        rows = sorted(rows, key=sort_key)
+    if limit is not None:
+        rows = rows[offset : offset + limit]
+    return rows
+
+
 def scan_payloads(sql):
     if sql.strip() == "__recorded__":
         rows = [{"statement": text} for text in list(STATE.recorded)]
@@ -267,6 +475,8 @@ def scan_payloads(sql):
         rows = [{}]
     else:
         rows = source if from_orders else [{}]
+    if from_orders:
+        rows = apply_query(sql, rows)
     if "__multi__" in sql and len(rows) > 1:
         return names, [table_for(names, rows[:2]), table_for(names, rows[2:])]
     return names, [table_for(names, rows)]

@@ -5,6 +5,7 @@
 #include "databricks_http.hpp"
 #include "duckdb/common/optional_idx.hpp"
 
+#include <mutex>
 #include <optional>
 
 namespace duckdb {
@@ -73,9 +74,14 @@ private:
 	void ThrowApiError(const string &body, long status, const string &fallback_state) const;
 	vector<DatabricksExternalLink> FetchChunkLinks(ClientContext &context, const string &statement_id,
 	                                               idx_t chunk_index);
+	//! Copies the cached links, fetching them first when missing or when force_refresh is set.
+	vector<DatabricksExternalLink> LinksForChunk(ClientContext &context, DatabricksStatementResult &result,
+	                                             idx_t chunk_index, bool force_refresh);
 
 	DatabricksConfig config;
 	DatabricksAuth auth;
+	//! Guards chunk_links. HTTP itself runs outside the lock so chunk downloads can overlap.
+	std::mutex chunk_lock;
 };
 
 } // namespace duckdb

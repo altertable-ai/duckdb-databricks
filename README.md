@@ -50,17 +50,20 @@ Cannot write to a read-only Databricks database
 
 Schema, table, and column metadata is cached on the attached database until then. `INSERT`, `UPDATE`, `DELETE`, and `CREATE TABLE` from DuckDB syntax are not available yet; send those statements with `databricks_execute`.
 
+Filters, `LIMIT`, and `ORDER BY ... LIMIT` are sent to the warehouse when `dbx_filter_pushdown` and `dbx_order_pushdown` are on. A pushed filter is not checked again in DuckDB. `FLOAT` and `DOUBLE` comparisons, collated strings, and `JSON` stay in DuckDB. `EXPLAIN` shows a pushed `ORDER BY` or `LIMIT` as `Pushed Down`. `EXPLAIN ANALYZE` shows the statement text as `SQL`.
+
 ## Settings
 
 | Setting | Default | |
 | --- | --- | --- |
+| `dbx_filter_pushdown` | `true` | Send filters to the warehouse |
+| `dbx_order_pushdown` | `true` | Send `ORDER BY ... LIMIT` to the warehouse |
+| `dbx_insert_max_statement_bytes` | `12582912` | Maximum text of one `INSERT`. Hard cap 16 MiB |
 | `dbx_http_timeout_ms` | `60000` | Per-request HTTP timeout |
 | `dbx_http_retries` | `5` | Retries for HTTP 429, 503, and connection errors |
 | `dbx_statement_timeout_ms` | `0` | Cancel a statement that is still running after this many milliseconds. `0` waits |
 | `dbx_ca_cert` | `system` | PEM bundle to trust |
 | `dbx_debug_show_queries` | `false` | Print each statement text and id |
-
-These settings are read when a request runs. They are registered with DuckDB in a later change; until then the defaults above apply.
 
 Secrets redact `TOKEN` and `CLIENT_SECRET`. Errors name the HTTP step (`auth`, `submit`, `poll`, `chunk download`) and do not include authorization headers or the query string of a presigned URL.
 

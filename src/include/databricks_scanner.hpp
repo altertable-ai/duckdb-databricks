@@ -20,6 +20,12 @@ struct DatabricksScanBindData : public TableFunctionData {
 	vector<DatabricksColumn> columns;
 	TableCatalogEntry *table_entry = nullptr;
 	shared_ptr<CatalogEntry> lifetime;
+	bool filter_pushdown = false;
+	//! Predicate captured by pushdown_complex_filter, without a WHERE keyword.
+	string extra_filter;
+	//! Set by the optimizer. Includes the leading space.
+	string order_by_clause;
+	string limit_clause;
 
 	unique_ptr<FunctionData> Copy() const override;
 	bool Equals(const FunctionData &other_p) const override;
@@ -29,7 +35,8 @@ class DatabricksScanFunction : public TableFunction {
 public:
 	DatabricksScanFunction();
 
-	static string BuildQuery(const DatabricksScanBindData &bind_data, const vector<column_t> &column_ids);
+	static string BuildQuery(const DatabricksScanBindData &bind_data, const vector<column_t> &column_ids,
+	                         optional_ptr<TableFilterSet> filters);
 	static void SetScanCallbacks(TableFunction &function);
 };
 

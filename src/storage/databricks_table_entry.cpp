@@ -1,6 +1,7 @@
 #include "storage/databricks_table_entry.hpp"
 
 #include "databricks_scanner.hpp"
+#include "databricks_utils.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
 #include "storage/databricks_catalog.hpp"
@@ -30,7 +31,6 @@ unique_ptr<BaseStatistics> DatabricksTableEntry::GetStatistics(ClientContext &co
 }
 
 TableFunction DatabricksTableEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
-	(void)context;
 	ThrowIfColumnsCollide();
 	auto result = make_uniq<DatabricksScanBindData>();
 	auto &dbx_catalog = catalog.Cast<DatabricksCatalog>();
@@ -41,6 +41,7 @@ TableFunction DatabricksTableEntry::GetScanFunction(ClientContext &context, uniq
 	result->schema = schema.name;
 	result->table = name;
 	result->columns = columns;
+	result->filter_pushdown = DatabricksSettingBool(context, "dbx_filter_pushdown", true);
 	bind_data = std::move(result);
 	return DatabricksScanFunction();
 }

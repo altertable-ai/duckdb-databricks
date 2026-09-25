@@ -19,6 +19,19 @@ inline string DatabricksQuoteIdentifier(const string &name) {
 	return result;
 }
 
+//! Databricks string literal. Backslash and quote are escaped; other bytes are copied.
+inline string DatabricksQuoteString(const string &value) {
+	string result = "'";
+	for (auto ch : value) {
+		if (ch == '\\' || ch == '\'') {
+			result.push_back('\\');
+		}
+		result.push_back(ch);
+	}
+	result.push_back('\'');
+	return result;
+}
+
 inline string DatabricksQualifiedName(const string &catalog, const string &schema, const string &table) {
 	return DatabricksQuoteIdentifier(catalog) + "." + DatabricksQuoteIdentifier(schema) + "." +
 	       DatabricksQuoteIdentifier(table);
