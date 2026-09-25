@@ -1,13 +1,28 @@
 {
-        "dependencies": [
-                "openssl"
-        ],
-        "vcpkg-configuration": {
-                "overlay-ports": [
-                        "./extension-ci-tools/vcpkg_ports"
-                ],
-                "overlay-triplets": [
-                        "./extension-ci-tools/toolchains"
-                ]
-        }
+	"dependencies": [
+		"nlohmann-json",
+		{
+			"name": "openssl"
+		},
+		{
+			"name": "curl",
+			"platform": "!windows",
+			"features": ["ssl"]
+		},
+		{
+			"name": "curl",
+			"platform": "windows",
+			"features": ["schannel"]
+		},
+		{
+			"name": "arrow",
+			"default-features": false
+		}
+	],
+	"vcpkg-configuration": {
+		"overlay-ports": [
+			"./vcpkg_overlays",
+			"./extension-ci-tools/vcpkg_ports"
+		]
+	}
 }

@@ -1,0 +1,127 @@
+# name: test/sql/fake/read.test
+# description: reads against the fake Databricks statement API
+# group: [fake]
+
+require-env FAKE_DATABRICKS_PORT
+
+require databricks
+
+set ignore_error_messages __no_such_error__
+
+statement ok
+CREATE SECRET dbx (TYPE databricks, HOST 'http://127.0.0.1:${FAKE_DATABRICKS_PORT}', WAREHOUSE_ID 'wh', TOKEN 'pat');
+
+statement ok
+ATTACH 'main' AS db (TYPE databricks, SECRET dbx, SCHEMA 'sales');
+
+query I
+SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'db' ORDER BY schema_name;
+----
+sales
+
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'db' AND schema_name ILIKE 'information_schema';
+----
+0
+
+query II
+SELECT id, region FROM db.orders ORDER BY id;
+----
+1	east
+2	west
+3	NULL
+
+query I
+SELECT amount FROM db.orders WHERE id = 1;
+----
+10.50
+
+query I
+SELECT typeof(note) FROM db.orders WHERE id = 1;
+----
+JSON
+
+query I
+SELECT note FROM db.orders WHERE id = 1;
+----
+{"a": 1}
+
+query I
+SELECT count(*) FROM db.orders;
+----
+3
+
+query I
+SELECT count(*) > 0 FROM databricks_query('db', '__recorded__') WHERE contains(statement, '`id`, `region`');
+----
+true
+
+query I
+SELECT count(*) FROM databricks_query('db', 'SELECT `id` FROM `main`.`sales`.`orders` __multi__');
+----
+3
+
+query I
+SELECT n FROM databricks_query('db', 'SELECT 1 __pending__');
+----
+1
+
+query I
+SELECT n FROM databricks_query('db', 'SELECT 1 __429__');
+----
+1
+
+query I
+SELECT n FROM databricks_query('db', 'SELECT 1 __503__');
+----
+1
+
+query I
+SELECT count(*) FROM databricks_query('db', 'SELECT `id` FROM `main`.`sales`.`orders` __expire__');
+----
+3
+
+query I
+SELECT count(*) FROM databricks_query('db', 'SELECT `id` FROM `main`.`sales`.`orders` __403__');
+----
+3
+
+statement error
+SELECT * FROM databricks_query('db', '__fail__');
+----
+Databricks error TEST_ERROR: boom
+
+statement ok
+CALL databricks_execute('db', 'SELECT 1');
+
+statement ok
+CALL databricks_clear_cache();
+
+query I
+SELECT count(*) FROM db.orders;
+----
+3
+
+statement ok
+ATTACH 'main' AS ro (TYPE databricks, SECRET dbx, SCHEMA 'sales', READ_ONLY);
+
+statement error
+CALL databricks_execute('ro', 'SELECT 1');
+----
+read-only
+
+statement ok
+CREATE SECRET oauth (TYPE databricks, HOST 'http://127.0.0.1:${FAKE_DATABRICKS_PORT}', WAREHOUSE_ID 'wh', CLIENT_ID 'id', CLIENT_SECRET 'sec');
+
+statement ok
+ATTACH 'main' AS oauth_db (TYPE databricks, SECRET oauth, SCHEMA 'sales');
+
+query I
+SELECT n FROM databricks_query('oauth_db', 'SELECT 1 __401__');
+----
+1
+
+query I
+SELECT token_requests >= 2 FROM databricks_query('oauth_db', '__stats__');
+----
+true

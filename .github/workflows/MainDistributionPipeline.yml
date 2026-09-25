@@ -18,7 +18,10 @@ jobs:
     with:
       duckdb_version: v1.5.4
       ci_tools_version: v1.5-variegata
-      extension_name: waddle
+      extension_name: databricks
+      exclude_archs: "wasm_mvp;wasm_eh;wasm_threads;windows_amd64_mingw"
+      vcpkg_commit: "ce613c41372b23b1f51333815feb3edd87ef8a8b"
+      save_cache: ${{ github.event_name != 'pull_request' }}
 
   code-quality-check:
     name: Code Quality Check
@@ -26,5 +29,5 @@ jobs:
     with:
       duckdb_version: v1.5.4
       ci_tools_version: v1.5-variegata
-      extension_name: waddle
+      extension_name: databricks
       format_checks: 'format;tidy'

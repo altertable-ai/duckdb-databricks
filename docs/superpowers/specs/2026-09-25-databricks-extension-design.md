@@ -153,9 +153,27 @@ shared cache variable), and GCC builds use `-fno-gnu-unique`, both as in duckdb-
 - Decodes the body with `arrow::ipc::RecordBatchStreamReader` (LZ4 frame buffer compression handled by Arrow), exports
   each batch with `arrow::ExportRecordBatch`, and converts it with DuckDB's Arrow → vector conversion, as duckdb-bigquery
   does.
-- The first phase-1 task confirms against a real warehouse how nested types, `TIMESTAMP`, `TIMESTAMP_NTZ`, `INTERVAL`,
-  `VARIANT` and `DECIMAL` arrive in the stream. If nested types arrive as JSON strings, the reader parses them into the
-  DuckDB type from §4.3 (the catalog type is the source of truth), and this spec is updated.
+- Probed 2026-09-25 against a serverless SQL warehouse (`EXTERNAL_LINKS` / `ARROW_STREAM`, one row). Nested types do
+  **not** arrive as JSON strings. The Arrow schema was:
+
+  | Column | Arrow type |
+  | ------ | ---------- |
+  | `DECIMAL(10,2)` | `decimal128(10, 2)` |
+  | `TIMESTAMP` | `timestamp[us, tz=Etc/UTC]` |
+  | `TIMESTAMP_NTZ` | `timestamp[us]` |
+  | `INTERVAL YEAR TO MONTH` | `month_interval` (int32 months) |
+  | `INTERVAL DAY TO SECOND` | `duration[us]` (int64 microseconds) |
+  | `ARRAY<INT>` | `list<int32>` |
+  | `MAP<STRING, INT>` | `map<string, int32>` |
+  | `STRUCT<a: INT, b: STRING>` | `struct<a: int32, b: string>` |
+  | `ARRAY<STRUCT<…>>` | `list<struct<…>>` |
+  | `VARIANT` | `string` (UTF-8 JSON text, e.g. `{"a":1,"b":[true,null]}`) |
+
+  DuckDB's Arrow converter already maps those Arrow types onto the DuckDB types in §4.3 (`TIMESTAMP WITH TIME ZONE`,
+  `TIMESTAMP`, `INTERVAL`, `DECIMAL`, `LIST`, `MAP`, `STRUCT`). `VARIANT`'s UTF-8 payload is cast to `JSON`. The
+  catalog (or, for `databricks_query`, the manifest `type_text`) stays the source of truth when it disagrees with the
+  Arrow field, which is how `VARIANT` becomes `JSON` rather than `VARCHAR`. Chunk links on this probe had an empty
+  `http_headers` map; the reader still sends whatever headers the link provides.
 
 ### 3.6 Parallel scans
 
@@ -213,7 +231,7 @@ Identifiers are always quoted with backticks, with embedded backticks doubled.
 | `TIMESTAMP_NTZ` | `TIMESTAMP` |
 | `INTERVAL YEAR…MONTH`, `INTERVAL DAY…SECOND` | `INTERVAL` |
 | `ARRAY<T>`, `MAP<K, V>`, `STRUCT<…>` | `LIST`, `MAP`, `STRUCT` |
-| `VARIANT` | `JSON` |
+| `VARIANT` | `JSON` (Arrow field is UTF-8 JSON text; see §3.5) |
 | `GEOMETRY`, `GEOGRAPHY`, `OBJECT`, unknown | `VARCHAR` |
 | `VOID` | `INTEGER` (always `NULL`) |
 

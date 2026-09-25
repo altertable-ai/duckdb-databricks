@@ -1,0 +1,33 @@
+# name: test/sql/databricks/attach_errors.test
+# description: ATTACH fails before any network call when the secret is incomplete
+# group: [databricks]
+
+require databricks
+
+statement error
+ATTACH 'main' AS db (TYPE databricks);
+----
+HOST
+
+statement ok
+CREATE SECRET dbx (TYPE databricks, HOST 'example.databricks.com', TOKEN 't');
+
+statement error
+ATTACH 'main' AS db (TYPE databricks, SECRET dbx);
+----
+WAREHOUSE_ID
+
+statement error
+ATTACH '' AS db (TYPE databricks, SECRET dbx, WAREHOUSE_ID 'wh');
+----
+catalog
+
+statement error
+ATTACH 'main' AS db (TYPE databricks, SECRET missing, WAREHOUSE_ID 'wh');
+----
+not found
+
+statement error
+ATTACH 'main' AS db (TYPE databricks, SECRET dbx, WAREHOUSE_ID 'wh', NOPE 'x');
+----
+Unrecognized option

@@ -1,31 +1,62 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.5...3.29)
 
-# Set extension name here
-set(TARGET_NAME waddle)
-
-# DuckDB's extension distribution supports vcpkg. As such, dependencies can be added in ./vcpkg.json and then
-# used in cmake with find_package. Feel free to remove or replace with other dependencies.
-# Note that it should also be removed from vcpkg.json to prevent needlessly installing it..
-find_package(OpenSSL REQUIRED)
-
+set(TARGET_NAME databricks)
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
 project(${TARGET_NAME})
 
-set(CMAKE_CXX_STANDARD "17" CACHE STRING "C++ standard to enforce")
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+find_package(OpenSSL REQUIRED)
+find_package(CURL REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
+find_package(Arrow CONFIG REQUIRED)
 
 include_directories(src/include)
+add_subdirectory(src)
 
-set(EXTENSION_SOURCES src/waddle_extension.cpp)
+# Object libraries compile their own sources, so they need the third-party include
+# paths. Linking them PRIVATE does not replace the LINK_ONLY link on the extension.
+target_link_libraries(
+  databricks_ext PRIVATE CURL::libcurl OpenSSL::SSL OpenSSL::Crypto nlohmann_json::nlohmann_json
+                         "$<IF:$<BOOL:${ARROW_BUILD_STATIC}>,Arrow::arrow_static,Arrow::arrow_shared>")
 
-build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
-build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  foreach(databricks_target databricks_ext databricks_ext_storage)
+    target_compile_options(${databricks_target} PRIVATE -fno-gnu-unique)
+  endforeach()
+endif()
 
-# Link OpenSSL in both the static library as the loadable extension
-target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)
-target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)
+build_static_extension(${TARGET_NAME} ${ALL_OBJECT_FILES})
+build_loadable_extension(${TARGET_NAME} " " ${ALL_OBJECT_FILES})
+
+set(DATABRICKS_LINK_LIBS
+    CURL::libcurl
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    nlohmann_json::nlohmann_json
+    "$<IF:$<BOOL:${ARROW_BUILD_STATIC}>,Arrow::arrow_static,Arrow::arrow_shared>")
+if(WIN32)
+  list(APPEND DATABRICKS_LINK_LIBS ws2_32 crypt32)
+endif()
+
+function(link_libraries_to_extension target_name)
+  target_link_libraries(${target_name} ${DATABRICKS_LINK_LIBS})
+  get_target_property(target_type ${target_name} TYPE)
+  if(target_type STREQUAL "STATIC_LIBRARY")
+    get_target_property(interface_link_libraries ${target_name} INTERFACE_LINK_LIBRARIES)
+    if(interface_link_libraries STREQUAL "interface_link_libraries-NOTFOUND")
+      set(interface_link_libraries "")
+    endif()
+    foreach(link_dep IN LISTS DATABRICKS_LINK_LIBS)
+      list(REMOVE_ITEM interface_link_libraries "${link_dep}")
+      list(APPEND interface_link_libraries "$<LINK_ONLY:${link_dep}>")
+    endforeach()
+    set_property(TARGET ${target_name} PROPERTY INTERFACE_LINK_LIBRARIES "${interface_link_libraries}")
+  endif()
+endfunction()
+
+link_libraries_to_extension(${EXTENSION_NAME})
+link_libraries_to_extension(${LOADABLE_EXTENSION_NAME})
 
 install(
   TARGETS ${EXTENSION_NAME}
