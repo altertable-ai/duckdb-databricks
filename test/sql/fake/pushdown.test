@@ -1,0 +1,121 @@
+# name: test/sql/fake/pushdown.test
+# description: filter, limit, and order pushdown against the fake statement API
+# group: [fake]
+
+require-env FAKE_DATABRICKS_PORT
+
+require databricks
+
+set ignore_error_messages __no_such_error__
+
+statement ok
+CREATE SECRET dbx (TYPE databricks, HOST 'http://127.0.0.1:${FAKE_DATABRICKS_PORT}', WAREHOUSE_ID 'wh', TOKEN 'pat');
+
+statement ok
+ATTACH 'main' AS db (TYPE databricks, SECRET dbx, SCHEMA 'sales');
+
+statement ok
+SET threads=2;
+
+query I
+SELECT id FROM db.orders WHERE region = 'east';
+----
+1
+
+query I
+SELECT count(*) > 0 FROM databricks_query('db', '__recorded__') WHERE contains(statement, e'`region` = \'east\'');
+----
+true
+
+query I
+SELECT id FROM db.orders WHERE id IN (1, 3) ORDER BY id;
+----
+1
+3
+
+query I
+SELECT count(*) > 0 FROM databricks_query('db', '__recorded__') WHERE contains(statement, '`id` IN (1, 3)');
+----
+true
+
+query I
+SELECT id FROM db.orders WHERE region IS NULL;
+----
+3
+
+query I
+SELECT count(*) > 0 FROM databricks_query('db', '__recorded__') WHERE contains(statement, '`region` IS NULL');
+----
+true
+
+query I
+SELECT id FROM db.orders WHERE id >= 2 AND id <= 3 ORDER BY id;
+----
+2
+3
+
+query I
+SELECT id FROM db.orders ORDER BY id LIMIT 1;
+----
+1
+
+query I
+SELECT count(*) > 0 FROM databricks_query('db', '__recorded__') WHERE contains(statement, 'ORDER BY `id` ASC NULLS LAST') AND contains(statement, 'LIMIT 1');
+----
+true
+
+query I
+SELECT amount FROM db.orders WHERE note IS NULL;
+----
+20.00
+
+query I
+SELECT count(*) = 0 FROM databricks_query('db', '__recorded__') WHERE contains(statement, '`note` IS NULL');
+----
+true
+
+statement ok
+SET dbx_filter_pushdown=false;
+
+statement ok
+SELECT amount FROM db.orders WHERE region = 'west';
+
+query I
+SELECT count(*) > 0 FROM databricks_query('db', '__recorded__') WHERE contains(statement, '`amount`') AND contains(statement, '`region`') AND NOT contains(statement, 'WHERE');
+----
+true
+
+statement ok
+SET dbx_order_pushdown=false;
+
+statement ok
+SELECT id FROM db.orders ORDER BY region LIMIT 1;
+
+query I
+SELECT count(*) = 0 FROM databricks_query('db', '__recorded__') WHERE contains(statement, 'ORDER BY `region`');
+----
+true
+
+query I
+SELECT count(*) FROM databricks_query('db', 'SELECT `id` FROM `main`.`sales`.`orders` __multi__');
+----
+3
+
+statement ok
+SET dbx_filter_pushdown=true;
+
+statement ok
+SET disabled_optimizers='expression_rewriter';
+
+query I
+SELECT count(*) FROM db.orders WHERE region LIKE 'a\%';
+----
+0
+
+query I
+SELECT count(*) > 0 FROM databricks_query('db', '__recorded__') WHERE contains(statement, e'LIKE \'a\\\\\\\\%\' ESCAPE');
+----
+true
+
+statement ok
+SET disabled_optimizers='';

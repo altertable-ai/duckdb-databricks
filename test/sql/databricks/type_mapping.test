@@ -1,0 +1,55 @@
+# name: test/sql/databricks/type_mapping.test
+# description: Databricks type text maps to DuckDB type names
+# group: [databricks]
+
+require databricks
+
+query I
+SELECT databricks_type_mapping('ARRAY<STRUCT<a: INT, b: STRING>>');
+----
+STRUCT(a INTEGER, b VARCHAR)[]
+
+query I
+SELECT databricks_type_mapping('DECIMAL(10,2)');
+----
+DECIMAL(10,2)
+
+query I
+SELECT databricks_type_mapping('TIMESTAMP');
+----
+TIMESTAMP WITH TIME ZONE
+
+query I
+SELECT databricks_type_mapping('TIMESTAMP_NTZ');
+----
+TIMESTAMP
+
+query I
+SELECT databricks_type_mapping('STRING COLLATE utf8');
+----
+VARCHAR
+
+query I
+SELECT databricks_type_mapping('VARIANT');
+----
+JSON
+
+query I
+SELECT databricks_type_mapping('VOID');
+----
+INTEGER
+
+query I
+SELECT databricks_type_mapping('INTERVAL YEAR TO MONTH');
+----
+INTERVAL
+
+query I
+SELECT databricks_type_mapping('MAP<STRING, INT>');
+----
+MAP(VARCHAR, INTEGER)
+
+query I
+SELECT databricks_type_mapping('GEOMETRY');
+----
+VARCHAR

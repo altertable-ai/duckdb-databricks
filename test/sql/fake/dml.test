@@ -1,0 +1,121 @@
+# name: test/sql/fake/dml.test
+# description: update, delete, and truncate against the fake statement API
+# group: [fake]
+
+require-env FAKE_DATABRICKS_PORT
+
+require databricks
+
+set ignore_error_messages __no_such_error__
+
+statement ok
+CREATE SECRET dbx (TYPE databricks, HOST 'http://127.0.0.1:${FAKE_DATABRICKS_PORT}', WAREHOUSE_ID 'wh', TOKEN 'pat');
+
+statement ok
+ATTACH 'main' AS db (TYPE databricks, SECRET dbx, SCHEMA 'sales');
+
+statement ok
+CREATE TABLE db.changes (id INTEGER, region VARCHAR, amount INTEGER);
+
+statement ok
+INSERT INTO db.changes VALUES (1, 'east', 10), (2, 'West', 20), (3, 'north', 30);
+
+query I
+UPDATE db.changes SET region = 'south' WHERE id = 1;
+----
+1
+
+query I
+SELECT region FROM db.changes WHERE id = 1;
+----
+south
+
+query I
+SELECT count(*) FROM databricks_query('db', '__recorded__') WHERE statement = 'UPDATE `main`.`sales`.`changes` SET `region` = ''south'' WHERE `id` = 1';
+----
+1
+
+statement ok
+UPDATE db.changes SET region = lower(region) WHERE id = 2;
+
+query I
+SELECT statement FROM databricks_query('db', '__recorded__') WHERE contains(statement, 'lower(');
+----
+UPDATE `main`.`sales`.`changes` SET `region` = lower(`region`) WHERE `id` = 2
+
+statement ok
+UPDATE db.changes SET amount = amount + 1 WHERE id = 1 AND region LIKE 's%';
+
+query I
+SELECT statement FROM databricks_query('db', '__recorded__') WHERE contains(statement, '`amount` = (`amount` + 1)');
+----
+UPDATE `main`.`sales`.`changes` SET `amount` = (`amount` + 1) WHERE (`region` >= 's' AND `region` < 't') AND `id` = 1
+
+query I
+DELETE FROM db.changes WHERE id = 3;
+----
+1
+
+query I
+SELECT count(*) FROM db.changes;
+----
+2
+
+query I
+SELECT count(*) FROM databricks_query('db', '__recorded__') WHERE statement = 'DELETE FROM `main`.`sales`.`changes` WHERE `id` = 3';
+----
+1
+
+query I
+TRUNCATE TABLE db.changes;
+----
+2
+
+query I
+SELECT count(*) FROM db.changes;
+----
+0
+
+query I
+SELECT count(*) FROM databricks_query('db', '__recorded__') WHERE statement = 'DELETE FROM `main`.`sales`.`changes`';
+----
+1
+
+statement ok
+CREATE TABLE db.other (id INTEGER);
+
+statement ok
+INSERT INTO db.other VALUES (1);
+
+statement error
+UPDATE db.changes SET region = 'z' FROM db.other WHERE db.changes.id = other.id;
+----
+MERGE
+
+statement error
+UPDATE db.changes SET region = md5(region) WHERE id = 1;
+----
+MERGE
+
+statement error
+DELETE FROM db.changes WHERE id IN (SELECT id FROM db.other);
+----
+MERGE
+
+statement error
+DELETE FROM db.changes RETURNING id;
+----
+MERGE
+
+query I
+SELECT count(*) FROM databricks_query('db', '__recorded__') WHERE contains(statement, 'md5');
+----
+0
+
+statement ok
+ATTACH 'main' AS ro (TYPE databricks, SECRET dbx, SCHEMA 'sales', READ_ONLY);
+
+statement error
+DELETE FROM ro.changes WHERE id = 1;
+----
+read-only

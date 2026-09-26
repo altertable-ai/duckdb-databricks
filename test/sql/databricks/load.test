@@ -1,0 +1,15 @@
+# name: test/sql/databricks/load.test
+# description: the databricks extension loads
+# group: [databricks]
+
+statement error
+SELECT databricks_type_mapping('INT');
+----
+Catalog Error: Scalar Function with name databricks_type_mapping does not exist!
+
+require databricks
+
+query I
+SELECT databricks_type_mapping('INT');
+----
+INTEGER

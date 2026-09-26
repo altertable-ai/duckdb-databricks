@@ -17,7 +17,7 @@ DuckDB extensions uses VCPKG for dependency management. Enabling VCPKG is very s
 ```shell
 cd <your-working-dir-not-the-plugin-repo>
 git clone https://github.com/Microsoft/vcpkg.git
-cd vcpkg && git checkout ce613c41372b23b1f51333815feb3edd87ef8a8b
+cd vcpkg && git checkout 84bab45d415d22042bd0b9081aea57f362da3f35
 sh ./scripts/bootstrap.sh -disableMetrics
 export VCPKG_TOOLCHAIN_PATH=`pwd`/scripts/buildsystems/vcpkg.cmake
 ```
@@ -80,16 +80,7 @@ GEN=ninja make
 ## Running the extension
 To run the extension code, simply start the shell with `./build/release/duckdb`. This shell will have the extension pre-loaded.  
 
-Now we can use the features from the extension directly in DuckDB. The template contains a single scalar function `waddle()` that takes a string arguments and returns a string:
-```
-D select waddle('Jane') as result;
-┌───────────────┐
-│    result     │
-│    varchar    │
-├───────────────┤
-│ Quack Jane 🐥 │
-└───────────────┘
-```
+Attach a Databricks catalog and query it as described in the repository README.
 
 ## Running the tests
 Different tests can be created for DuckDB extensions. The primary way of testing DuckDB extensions should be the SQL tests in `./test/sql`. These SQL tests can be run using:

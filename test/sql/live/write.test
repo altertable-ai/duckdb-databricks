@@ -1,0 +1,119 @@
+# name: test/sql/live/write.test
+# description: inserts and DDL on a real warehouse
+# group: [live]
+
+require-env DATABRICKS_HOST
+
+require-env DATABRICKS_WAREHOUSE_ID
+
+require-env DATABRICKS_TEST_CATALOG
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_TEST_SCHEMA
+
+require databricks
+
+set ignore_error_messages __no_such_error__
+
+statement ok
+CREATE SECRET dbx (
+	TYPE databricks,
+	HOST '${DATABRICKS_HOST}',
+	WAREHOUSE_ID '${DATABRICKS_WAREHOUSE_ID}',
+	TOKEN '${DATABRICKS_TOKEN}',
+	CATALOG '${DATABRICKS_TEST_CATALOG}'
+);
+
+statement ok
+ATTACH '' AS db (TYPE databricks, SECRET dbx, SCHEMA '${DATABRICKS_TEST_SCHEMA}');
+
+statement ok
+CREATE SCHEMA db.side_${DATABRICKS_TEST_SCHEMA};
+
+statement ok
+DROP SCHEMA db.side_${DATABRICKS_TEST_SCHEMA};
+
+statement ok
+CREATE TABLE db.widgets (id INTEGER NOT NULL PRIMARY KEY, name VARCHAR DEFAULT 'x');
+
+query I
+SELECT count(*) FROM db.widgets;
+----
+0
+
+statement ok
+INSERT INTO db.widgets (id) VALUES (1);
+
+query I
+SELECT name FROM db.widgets;
+----
+x
+
+statement ok
+INSERT INTO db.widgets (id, name) VALUES (4, 'north'), (5, 'a''b');
+
+query I
+SELECT name FROM db.widgets WHERE id = 4;
+----
+north
+
+query I
+SELECT name FROM db.widgets WHERE id = 5;
+----
+a'b
+
+statement ok
+SET dbx_insert_max_statement_bytes=400;
+
+statement ok
+INSERT INTO db.widgets (id, name) VALUES
+	(10, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
+	(11, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'),
+	(12, 'cccccccccccccccccccccccccccccccccccccccc'),
+	(13, 'dddddddddddddddddddddddddddddddddddddddd'),
+	(14, 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'),
+	(15, 'ffffffffffffffffffffffffffffffffffffffff'),
+	(16, 'gggggggggggggggggggggggggggggggggggggggg'),
+	(17, 'hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh'),
+	(18, 'iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii'),
+	(19, 'jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj'),
+	(20, 'kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk'),
+	(21, 'llllllllllllllllllllllllllllllllllllllll'),
+	(22, 'mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm'),
+	(23, 'nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn'),
+	(24, 'oooooooooooooooooooooooooooooooooooooooo');
+
+query I
+SELECT count(*) FROM db.widgets;
+----
+18
+
+statement ok
+SET dbx_insert_max_statement_bytes=200;
+
+statement error
+INSERT INTO db.widgets (id, name) VALUES (8, 'abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz');
+----
+dbx_insert_max_statement_bytes
+
+statement error
+INSERT INTO db.widgets (id) VALUES (1) RETURNING id;
+----
+MERGE
+
+statement ok
+ATTACH '' AS ro (TYPE databricks, SECRET dbx, SCHEMA '${DATABRICKS_TEST_SCHEMA}', READ_ONLY);
+
+statement error
+INSERT INTO ro.widgets (id) VALUES (9);
+----
+read-only
+
+statement ok
+DROP TABLE db.widgets;
+
+statement error
+SELECT * FROM db.widgets;
+----
+does not exist

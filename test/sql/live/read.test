@@ -1,0 +1,99 @@
+# name: test/sql/live/read.test
+# description: scans, metadata, and execute against a real warehouse
+# group: [live]
+
+require-env DATABRICKS_HOST
+
+require-env DATABRICKS_WAREHOUSE_ID
+
+require-env DATABRICKS_TEST_CATALOG
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_TEST_SCHEMA
+
+require databricks
+
+set ignore_error_messages __no_such_error__
+
+statement ok
+CREATE SECRET dbx (
+	TYPE databricks,
+	HOST '${DATABRICKS_HOST}',
+	WAREHOUSE_ID '${DATABRICKS_WAREHOUSE_ID}',
+	TOKEN '${DATABRICKS_TOKEN}',
+	CATALOG '${DATABRICKS_TEST_CATALOG}'
+);
+
+statement ok
+ATTACH '' AS db (TYPE databricks, SECRET dbx, SCHEMA '${DATABRICKS_TEST_SCHEMA}');
+
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'db';
+----
+1
+
+query I
+SELECT schema_name = '${DATABRICKS_TEST_SCHEMA}' FROM duckdb_schemas() WHERE database_name = 'db';
+----
+true
+
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'db' AND schema_name ILIKE 'information_schema';
+----
+0
+
+statement ok
+CREATE TABLE db.read_orders (id INTEGER, region VARCHAR, amount DECIMAL(10,2), note VARCHAR);
+
+statement ok
+INSERT INTO db.read_orders VALUES (1, 'east', 10.50, '{"a": 1}'), (2, 'west', 20.00, NULL), (3, NULL, NULL, '{"b": 2}');
+
+query II
+SELECT id, region FROM db.read_orders ORDER BY id;
+----
+1	east
+2	west
+3	NULL
+
+query I
+SELECT amount FROM db.read_orders WHERE id = 1;
+----
+10.50
+
+query I
+SELECT note FROM db.read_orders WHERE id = 1;
+----
+{"a": 1}
+
+query I
+SELECT count(*) FROM db.read_orders;
+----
+3
+
+query I
+SELECT n FROM databricks_query('db', 'SELECT 1 AS n');
+----
+1
+
+statement ok
+CALL databricks_execute('db', 'SELECT 1');
+
+statement ok
+CALL databricks_clear_cache();
+
+query I
+SELECT count(*) FROM db.read_orders;
+----
+3
+
+statement ok
+ATTACH '' AS ro (TYPE databricks, SECRET dbx, SCHEMA '${DATABRICKS_TEST_SCHEMA}', READ_ONLY);
+
+statement error
+CALL databricks_execute('ro', 'SELECT 1');
+----
+read-only
+
+statement ok
+DROP TABLE db.read_orders;

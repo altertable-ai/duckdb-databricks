@@ -1,0 +1,30 @@
+# name: test/sql/live/select_one.test
+# description: one statement against a real warehouse
+# group: [live]
+
+require-env DATABRICKS_HOST
+
+require-env DATABRICKS_WAREHOUSE_ID
+
+require-env DATABRICKS_TEST_CATALOG
+
+require-env DATABRICKS_TOKEN
+
+require databricks
+
+statement ok
+CREATE SECRET dbx (
+	TYPE databricks,
+	HOST '${DATABRICKS_HOST}',
+	WAREHOUSE_ID '${DATABRICKS_WAREHOUSE_ID}',
+	TOKEN '${DATABRICKS_TOKEN}',
+	CATALOG '${DATABRICKS_TEST_CATALOG}'
+);
+
+statement ok
+ATTACH '' AS db (TYPE databricks, SECRET dbx);
+
+query I
+SELECT n FROM databricks_query('db', 'SELECT 1 AS n');
+----
+1

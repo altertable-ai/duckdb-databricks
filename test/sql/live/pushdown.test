@@ -1,0 +1,86 @@
+# name: test/sql/live/pushdown.test
+# description: filter, limit, and order results on a real warehouse
+# group: [live]
+
+require-env DATABRICKS_HOST
+
+require-env DATABRICKS_WAREHOUSE_ID
+
+require-env DATABRICKS_TEST_CATALOG
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_TEST_SCHEMA
+
+require databricks
+
+set ignore_error_messages __no_such_error__
+
+statement ok
+CREATE SECRET dbx (
+	TYPE databricks,
+	HOST '${DATABRICKS_HOST}',
+	WAREHOUSE_ID '${DATABRICKS_WAREHOUSE_ID}',
+	TOKEN '${DATABRICKS_TOKEN}',
+	CATALOG '${DATABRICKS_TEST_CATALOG}'
+);
+
+statement ok
+ATTACH '' AS db (TYPE databricks, SECRET dbx, SCHEMA '${DATABRICKS_TEST_SCHEMA}');
+
+statement ok
+CREATE TABLE db.push_orders (id INTEGER, region VARCHAR, amount DECIMAL(10,2), note VARCHAR);
+
+statement ok
+INSERT INTO db.push_orders VALUES (1, 'east', 10.50, '{"a": 1}'), (2, 'west', 20.00, NULL), (3, NULL, NULL, '{"b": 2}');
+
+query I
+SELECT id FROM db.push_orders WHERE region = 'east';
+----
+1
+
+query I
+SELECT id FROM db.push_orders WHERE id IN (1, 3) ORDER BY id;
+----
+1
+3
+
+query I
+SELECT id FROM db.push_orders WHERE region IS NULL;
+----
+3
+
+query I
+SELECT id FROM db.push_orders WHERE id >= 2 AND id <= 3 ORDER BY id;
+----
+2
+3
+
+query I
+SELECT id FROM db.push_orders ORDER BY id LIMIT 1;
+----
+1
+
+query I
+SELECT amount FROM db.push_orders WHERE note IS NULL;
+----
+20.00
+
+statement ok
+SET dbx_filter_pushdown=false;
+
+query I
+SELECT amount FROM db.push_orders WHERE region = 'west';
+----
+20.00
+
+statement ok
+SET dbx_order_pushdown=false;
+
+query I
+SELECT id FROM db.push_orders ORDER BY id LIMIT 1;
+----
+1
+
+statement ok
+DROP TABLE db.push_orders;
