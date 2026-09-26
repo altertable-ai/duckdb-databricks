@@ -11,6 +11,16 @@ namespace duckdb {
 DatabricksSchemaSet::DatabricksSchemaSet(Catalog &catalog) : DatabricksCatalogSet(catalog) {
 }
 
+void DatabricksSchemaSet::Seed(const string &name, const string &comment) {
+	CreateSchemaInfo info;
+	info.schema = name;
+	info.internal = false;
+	if (!comment.empty()) {
+		info.comment = Value(comment);
+	}
+	SeedEntry(make_uniq<DatabricksSchemaEntry>(catalog, info));
+}
+
 static bool IsHiddenSchema(const string &name) {
 	return StringUtil::CIEquals(name, "information_schema");
 }

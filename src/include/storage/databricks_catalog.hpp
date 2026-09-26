@@ -34,6 +34,8 @@ public:
 	}
 	void ThrowIfReadOnly() const;
 	void ClearCache();
+	//! Drop cached tables for one schema. The schema list stays.
+	void InvalidateTables(const string &schema_name);
 	void RetireEntries(vector<shared_ptr<CatalogEntry>> entries);
 	shared_ptr<CatalogEntry> GetSchemaEntryOwner(const string &name);
 

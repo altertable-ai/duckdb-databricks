@@ -124,12 +124,16 @@ static string CreateTableSql(const DatabricksCatalog &catalog, const string &sch
 	return sql;
 }
 
-void DatabricksDdl::Execute(ClientContext &context, DatabricksCatalog &catalog, const string &sql) {
+static void Run(ClientContext &context, DatabricksCatalog &catalog, const string &sql) {
 	catalog.ThrowIfReadOnly();
 	catalog.GetSession()->Execute(context, DatabricksStatementMode::SMALL, sql, catalog.GetConfig().catalog,
 	                              catalog.GetDefaultSchema(), {});
-	catalog.ClearCache();
 	DatabricksTransaction::Get(context, catalog).MarkWritten();
+}
+
+void DatabricksDdl::Execute(ClientContext &context, DatabricksCatalog &catalog, const string &sql) {
+	Run(context, catalog, sql);
+	catalog.ClearCache();
 }
 
 void DatabricksDdl::CreateSchema(ClientContext &context, DatabricksCatalog &catalog, CreateSchemaInfo &info) {
@@ -157,7 +161,7 @@ void DatabricksDdl::DropSchema(ClientContext &context, DatabricksCatalog &catalo
 
 void DatabricksDdl::CreateTable(ClientContext &context, DatabricksCatalog &catalog, const string &schema,
                                 CreateTableInfo &info) {
-	Execute(context, catalog, CreateTableSql(catalog, schema, info));
+	Run(context, catalog, CreateTableSql(catalog, schema, info));
 }
 
 void DatabricksDdl::DropTable(ClientContext &context, DatabricksCatalog &catalog, DropInfo &info) {
@@ -166,7 +170,7 @@ void DatabricksDdl::DropTable(ClientContext &context, DatabricksCatalog &catalog
 		sql += "IF EXISTS ";
 	}
 	sql += DatabricksQualifiedName(catalog.GetConfig().catalog, info.schema, info.name);
-	Execute(context, catalog, sql);
+	Run(context, catalog, sql);
 }
 
 static string Qualified(const DatabricksCatalog &catalog, const AlterInfo &info) {
@@ -242,7 +246,7 @@ void DatabricksDdl::Alter(ClientContext &context, DatabricksCatalog &catalog, Al
 		throw NotImplementedException(
 		    "This ALTER TABLE is not supported for Databricks tables; use databricks_execute()");
 	}
-	Execute(context, catalog, sql);
+	Run(context, catalog, sql);
 }
 
 } // namespace duckdb

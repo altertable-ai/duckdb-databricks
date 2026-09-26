@@ -1,6 +1,7 @@
 #include "storage/databricks_catalog_set.hpp"
 
 #include "duckdb/common/string_util.hpp"
+#include <algorithm>
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/transaction/transaction.hpp"
 #include "storage/databricks_catalog.hpp"
@@ -63,6 +64,44 @@ void DatabricksCatalogSet::Scan(ClientContext &context, const std::function<void
 	for (auto &entry : snapshot) {
 		callback(*entry);
 	}
+}
+
+bool DatabricksCatalogSet::IsLoaded() {
+	lock_guard<mutex> load_guard(load_lock);
+	return is_loaded;
+}
+
+void DatabricksCatalogSet::Erase(const string &name) {
+	shared_ptr<CatalogEntry> removed;
+	{
+		lock_guard<mutex> guard(entry_lock);
+		auto exact = entries.find(name);
+		if (exact != entries.end()) {
+			removed = exact->second;
+		} else {
+			for (auto &entry : ordered_entries) {
+				if (StringUtil::CIEquals(entry->name, name)) {
+					removed = entry;
+					break;
+				}
+			}
+		}
+		if (!removed) {
+			return;
+		}
+		entries.erase(removed->name);
+		ordered_entries.erase(std::remove(ordered_entries.begin(), ordered_entries.end(), removed),
+		                      ordered_entries.end());
+	}
+	vector<shared_ptr<CatalogEntry>> retired;
+	retired.push_back(std::move(removed));
+	catalog.Cast<DatabricksCatalog>().RetireEntries(std::move(retired));
+}
+
+void DatabricksCatalogSet::SeedEntry(unique_ptr<CatalogEntry> entry) {
+	CreateEntry(std::move(entry));
+	lock_guard<mutex> load_guard(load_lock);
+	is_loaded = true;
 }
 
 void DatabricksCatalogSet::ClearEntries() {

@@ -106,7 +106,7 @@ static void PrepareTarget(const DatabricksInsert &op, ClientContext &context, Da
 	}
 	auto &info = *op.create_info;
 	if (info.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
-		catalog.ClearCache();
+		catalog.InvalidateTables(op.schema_name);
 		auto transaction = catalog.GetCatalogTransaction(context);
 		auto schema = catalog.LookupSchema(transaction, EntryLookupInfo(CatalogType::SCHEMA_ENTRY, op.schema_name),
 		                                   OnEntryNotFound::RETURN_NULL);
@@ -116,6 +116,7 @@ static void PrepareTarget(const DatabricksInsert &op, ClientContext &context, Da
 		}
 	}
 	DatabricksDdl::CreateTable(context, catalog, op.schema_name, info);
+	catalog.InvalidateTables(op.schema_name);
 	gstate.created = true;
 	idx_t source = 0;
 	for (auto &column : info.columns.Logical()) {
@@ -150,6 +151,7 @@ static void Flush(const DatabricksInsert &op, ClientContext &context, Databricks
 				drop.name = op.table_name;
 				drop.if_not_found = OnEntryNotFound::RETURN_NULL;
 				DatabricksDdl::DropTable(context, catalog, drop);
+				catalog.InvalidateTables(op.schema_name);
 			} catch (std::exception &drop_error) {
 				DUCKDB_LOG_WARNING(context,
 				                   "Databricks CREATE TABLE AS failed and the new table could not be dropped: %s",

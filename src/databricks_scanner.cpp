@@ -184,25 +184,28 @@ void ScanFunction(ClientContext &context, TableFunctionInput &data, DataChunk &o
 	auto &bind_data = data.bind_data->Cast<DatabricksScanBindData>();
 	auto &global = data.global_state->Cast<DatabricksScanGlobalState>();
 	auto &local = data.local_state->Cast<DatabricksScanLocalState>();
-	if (local.exhausted) {
-		output.SetCardinality(0);
-		return;
-	}
-	while (local.batch_index >= local.batches.size()) {
-		if (!LoadNextChunk(context, global, local)) {
+	while (true) {
+		if (local.exhausted) {
 			output.SetCardinality(0);
 			return;
 		}
-	}
-	auto &batch = local.batches[local.batch_index];
-	auto length = static_cast<idx_t>(batch.array->arrow_array.length);
-	if (local.offset >= length) {
+		while (local.batch_index >= local.batches.size()) {
+			if (!LoadNextChunk(context, global, local)) {
+				output.SetCardinality(0);
+				return;
+			}
+		}
+		auto &batch = local.batches[local.batch_index];
+		auto length = static_cast<idx_t>(batch.array->arrow_array.length);
+		if (local.offset < length) {
+			break;
+		}
 		local.batch_index++;
 		local.offset = 0;
 		local.arrow_state.reset();
-		ScanFunction(context, data, output);
-		return;
 	}
+	auto &batch = local.batches[local.batch_index];
+	auto length = static_cast<idx_t>(batch.array->arrow_array.length);
 	auto count = std::min(length - local.offset, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
 	output.SetCardinality(count);
 	if (output.ColumnCount() == 0) {

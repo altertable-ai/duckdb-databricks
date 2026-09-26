@@ -37,28 +37,35 @@ DatabricksCatalog::DatabricksCatalog(AttachedDatabase &db, DatabricksConfig conf
 	if (options.schema.empty()) {
 		return;
 	}
-	auto schema_sql =
-	    "SELECT schema_name FROM " + DatabricksQuoteIdentifier(config.catalog) + ".information_schema.schemata";
+	auto schema_sql = "SELECT schema_name, comment FROM " + DatabricksQuoteIdentifier(config.catalog) +
+	                  ".information_schema.schemata";
 	auto schemata =
 	    session->Execute(context, DatabricksStatementMode::SMALL, schema_sql, config.catalog, GetDefaultSchema(), {});
-	string ci_match;
+	string matched;
+	string comment;
 	for (idx_t row = 0; row < schemata.rows.size(); row++) {
 		auto name = session->Cell(schemata, row, "schema_name");
 		if (!name || StringUtil::CIEquals(*name, "information_schema")) {
 			continue;
 		}
+		if (*name != options.schema && !StringUtil::CIEquals(*name, options.schema)) {
+			continue;
+		}
+		if (matched.empty() || *name == options.schema) {
+			matched = *name;
+			auto comment_cell = session->Cell(schemata, row, "comment");
+			comment = comment_cell ? *comment_cell : "";
+		}
 		if (*name == options.schema) {
-			return;
-		}
-		if (ci_match.empty() && StringUtil::CIEquals(*name, options.schema)) {
-			ci_match = *name;
+			break;
 		}
 	}
-	if (!ci_match.empty()) {
-		options.schema = ci_match;
-		return;
+	if (matched.empty()) {
+		throw BinderException("Databricks schema \"%s\" was not found in catalog \"%s\"", options.schema,
+		                      config.catalog);
 	}
-	throw BinderException("Databricks schema \"%s\" was not found in catalog \"%s\"", options.schema, config.catalog);
+	options.schema = matched;
+	schemas.Seed(matched, comment);
 }
 
 DatabricksCatalog::~DatabricksCatalog() = default;
@@ -115,6 +122,14 @@ void DatabricksCatalog::ThrowIfReadOnly() const {
 
 void DatabricksCatalog::ClearCache() {
 	schemas.ClearEntries();
+}
+
+void DatabricksCatalog::InvalidateTables(const string &schema_name) {
+	auto owner = schemas.GetEntryOwner(schema_name);
+	if (!owner) {
+		return;
+	}
+	owner->Cast<DatabricksSchemaEntry>().InvalidateTables();
 }
 
 void DatabricksCatalog::RetireEntries(vector<shared_ptr<CatalogEntry>> entries) {
