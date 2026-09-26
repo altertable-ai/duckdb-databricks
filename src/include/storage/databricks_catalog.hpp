@@ -33,9 +33,15 @@ public:
 		return session;
 	}
 	void ThrowIfReadOnly() const;
+	//! Runs SQL, then records that this transaction wrote to the warehouse.
+	DatabricksStatementResult ExecuteWrite(ClientContext &context, const string &sql, const string &schema);
 	void ClearCache();
 	//! Drop cached tables for one schema. The schema list stays.
 	void InvalidateTables(const string &schema_name);
+	void EraseSchema(const string &schema_name);
+	void EraseTable(const string &schema_name, const string &table_name);
+	//! ATTACH SCHEMA matched a warehouse schema under a different spelling.
+	void NoteAttachedSchema(string canonical_name);
 	void RetireEntries(vector<shared_ptr<CatalogEntry>> entries);
 	shared_ptr<CatalogEntry> GetSchemaEntryOwner(const string &name);
 

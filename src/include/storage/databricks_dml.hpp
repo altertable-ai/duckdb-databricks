@@ -3,7 +3,6 @@
 #include "duckdb/execution/physical_operator.hpp"
 
 namespace duckdb {
-class ClientContext;
 class LogicalDelete;
 class LogicalUpdate;
 
@@ -11,8 +10,8 @@ class DatabricksDml : public PhysicalOperator {
 public:
 	DatabricksDml(PhysicalPlan &physical_plan, LogicalOperator &op, string catalog_name, string schema, string sql);
 
-	static string UpdateSql(ClientContext &context, LogicalUpdate &op);
-	static string DeleteSql(ClientContext &context, LogicalDelete &op);
+	static string UpdateSql(LogicalUpdate &op);
+	static string DeleteSql(LogicalDelete &op);
 
 	string catalog_name;
 	string schema_name;

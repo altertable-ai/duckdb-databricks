@@ -4,6 +4,7 @@
 #include "databricks_config.hpp"
 #include "databricks_http.hpp"
 #include "duckdb/common/optional_idx.hpp"
+#include "duckdb/common/shared_ptr.hpp"
 
 #include <mutex>
 #include <optional>
@@ -57,8 +58,9 @@ public:
 	DatabricksStatementResult Execute(ClientContext &context, DatabricksStatementMode mode, const string &sql,
 	                                  const string &catalog, const string &schema,
 	                                  const vector<DatabricksParameter> &parameters);
-	//! Presigned Arrow bytes for one result chunk. Refreshes an expired or 403 link once
-	vector<string> DownloadChunk(ClientContext &context, DatabricksStatementResult &result, idx_t chunk_index);
+	//! Presigned links for one result chunk. The caller caches them.
+	vector<DatabricksExternalLink> FetchChunkLinks(ClientContext &context, const string &statement_id,
+	                                               idx_t chunk_index);
 	void Cancel(ClientContext &context, const string &statement_id);
 
 	std::optional<string> Cell(const DatabricksStatementResult &result, idx_t row, const string &column) const;
@@ -72,16 +74,29 @@ private:
 	void Poll(ClientContext &context, DatabricksStatementResult &result, string &last_body);
 	void ParseStatement(const string &body, DatabricksStatementResult &result) const;
 	void ThrowApiError(const string &body, long status, const string &fallback_state) const;
-	vector<DatabricksExternalLink> FetchChunkLinks(ClientContext &context, const string &statement_id,
-	                                               idx_t chunk_index);
-	//! Copies the cached links, fetching them first when missing or when force_refresh is set.
-	vector<DatabricksExternalLink> LinksForChunk(ClientContext &context, DatabricksStatementResult &result,
-	                                             idx_t chunk_index, bool force_refresh);
 
 	DatabricksConfig config;
 	DatabricksAuth auth;
-	//! Guards chunk_links. HTTP itself runs outside the lock so chunk downloads can overlap.
-	std::mutex chunk_lock;
+};
+
+//! Owns one statement result and its chunk-link cache. Safe for overlapping chunk downloads.
+class DatabricksResultReader {
+public:
+	DatabricksResultReader(shared_ptr<DatabricksSession> session, DatabricksStatementResult result);
+
+	const DatabricksStatementResult &Result() const {
+		return result;
+	}
+	//! Presigned Arrow bytes for one result chunk. Refreshes an expired or 403 link once.
+	vector<string> Download(ClientContext &context, idx_t chunk_index);
+
+private:
+	vector<DatabricksExternalLink> ChunkLinks(ClientContext &context, idx_t chunk_index, bool refresh);
+	bool TryDownload(ClientContext &context, const vector<DatabricksExternalLink> &links, vector<string> &payloads);
+
+	shared_ptr<DatabricksSession> session;
+	DatabricksStatementResult result;
+	std::mutex lock;
 };
 
 } // namespace duckdb

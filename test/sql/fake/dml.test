@@ -77,7 +77,7 @@ SELECT count(*) FROM db.changes;
 0
 
 query I
-SELECT count(*) FROM databricks_query('db', '__recorded__') WHERE statement = 'TRUNCATE TABLE `main`.`sales`.`changes`';
+SELECT count(*) FROM databricks_query('db', '__recorded__') WHERE statement = 'DELETE FROM `main`.`sales`.`changes`';
 ----
 1
 

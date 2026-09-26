@@ -76,6 +76,15 @@ bool LinkExpired(const string &expiration) {
 	return std::chrono::system_clock::now() >= std::chrono::system_clock::from_time_t(when);
 }
 
+bool LinksExpired(const vector<DatabricksExternalLink> &links) {
+	for (auto &link : links) {
+		if (LinkExpired(link.expiration)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 } // namespace
 
 DatabricksSession::DatabricksSession(DatabricksConfig config_p) : config(std::move(config_p)), auth(config) {
@@ -364,48 +373,37 @@ vector<DatabricksExternalLink> DatabricksSession::FetchChunkLinks(ClientContext 
 	                  chunk_index);
 }
 
-vector<DatabricksExternalLink> DatabricksSession::LinksForChunk(ClientContext &context,
-                                                                DatabricksStatementResult &result, idx_t chunk_index,
-                                                                bool force_refresh) {
-	if (!force_refresh) {
-		lock_guard<mutex> guard(chunk_lock);
+DatabricksResultReader::DatabricksResultReader(shared_ptr<DatabricksSession> session_p,
+                                               DatabricksStatementResult result_p)
+    : session(std::move(session_p)), result(std::move(result_p)) {
+}
+
+vector<DatabricksExternalLink> DatabricksResultReader::ChunkLinks(ClientContext &context, idx_t chunk_index,
+                                                                  bool refresh) {
+	if (!refresh) {
+		lock_guard<mutex> guard(lock);
 		if (chunk_index < result.chunk_links.size() && !result.chunk_links[chunk_index].empty()) {
 			return result.chunk_links[chunk_index];
 		}
 	}
-	auto fetched = FetchChunkLinks(context, result.statement_id, chunk_index);
-	lock_guard<mutex> guard(chunk_lock);
+	auto fetched = session->FetchChunkLinks(context, result.statement_id, chunk_index);
+	lock_guard<mutex> guard(lock);
 	if (result.chunk_links.size() <= chunk_index) {
 		result.chunk_links.resize(chunk_index + 1);
 	}
-	if (force_refresh || result.chunk_links[chunk_index].empty()) {
+	if (refresh || result.chunk_links[chunk_index].empty()) {
 		result.chunk_links[chunk_index] = fetched;
 	}
 	return result.chunk_links[chunk_index];
 }
 
-vector<string> DatabricksSession::DownloadChunk(ClientContext &context, DatabricksStatementResult &result,
-                                                idx_t chunk_index) {
-	auto links = LinksForChunk(context, result, chunk_index, false);
-	bool refreshed = false;
+bool DatabricksResultReader::TryDownload(ClientContext &context, const vector<DatabricksExternalLink> &links,
+                                         vector<string> &payloads) {
 	for (auto &link : links) {
-		if (LinkExpired(link.expiration)) {
-			links = LinksForChunk(context, result, chunk_index, true);
-			refreshed = true;
-			break;
-		}
-	}
-	vector<string> payloads;
-	for (idx_t link_index = 0; link_index < links.size(); link_index++) {
-		auto &link = links[link_index];
-		auto response = DatabricksHttp::Request(context, config, "chunk download", "GET", link.url, "",
+		auto response = DatabricksHttp::Request(context, session->Config(), "chunk download", "GET", link.url, "",
 		                                        link.http_headers, "", "", true);
-		if (response.status == 403 && !refreshed) {
-			links = LinksForChunk(context, result, chunk_index, true);
-			refreshed = true;
-			link_index = static_cast<idx_t>(-1);
-			payloads.clear();
-			continue;
+		if (response.status == 403) {
+			return false;
 		}
 		if (response.status < 200 || response.status >= 300) {
 			throw IOException("Databricks transport error during chunk download: HTTP %ld for %s", response.status,
@@ -413,10 +411,20 @@ vector<string> DatabricksSession::DownloadChunk(ClientContext &context, Databric
 		}
 		payloads.push_back(std::move(response.body));
 	}
-	for (auto &link : links) {
-		if (LinkExpired(link.expiration)) {
-			throw IOException("Databricks transport error during chunk download: link for chunk %llu expired",
-			                  chunk_index);
+	return true;
+}
+
+vector<string> DatabricksResultReader::Download(ClientContext &context, idx_t chunk_index) {
+	auto links = ChunkLinks(context, chunk_index, false);
+	if (LinksExpired(links)) {
+		links = ChunkLinks(context, chunk_index, true);
+	}
+	vector<string> payloads;
+	if (!TryDownload(context, links, payloads)) {
+		links = ChunkLinks(context, chunk_index, true);
+		payloads.clear();
+		if (!TryDownload(context, links, payloads)) {
+			throw IOException("Databricks transport error during chunk download: HTTP 403 for chunk %llu", chunk_index);
 		}
 	}
 	return payloads;

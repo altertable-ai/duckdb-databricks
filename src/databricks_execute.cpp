@@ -3,7 +3,6 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/settings.hpp"
 #include "storage/databricks_catalog.hpp"
-#include "storage/databricks_transaction.hpp"
 
 namespace duckdb {
 
@@ -37,10 +36,7 @@ static void ExecuteFunction(ClientContext &context, TableFunctionInput &input, D
 		return;
 	}
 	auto &catalog = DatabricksCatalog::GetAttachedDatabase(context, data.database_name, "databricks_execute");
-	catalog.ThrowIfReadOnly();
-	catalog.GetSession()->Execute(context, DatabricksStatementMode::SMALL, data.sql, catalog.GetConfig().catalog,
-	                              catalog.GetDefaultSchema(), {});
-	DatabricksTransaction::Get(context, catalog).MarkWritten();
+	catalog.ExecuteWrite(context, data.sql, catalog.GetDefaultSchema());
 	catalog.ClearCache();
 	data.finished = true;
 	output.SetCardinality(1);

@@ -11,11 +11,7 @@ namespace duckdb {
 DatabricksCatalogSet::DatabricksCatalogSet(Catalog &catalog) : catalog(catalog) {
 }
 
-void DatabricksCatalogSet::TryLoadEntries(ClientContext &context) {
-	if (context.transaction.HasActiveTransaction()) {
-		Transaction::Get(context, catalog.GetAttached());
-	}
-	lock_guard<mutex> load_guard(load_lock);
+void DatabricksCatalogSet::LoadLocked(ClientContext &context) {
 	if (is_loaded) {
 		return;
 	}
@@ -28,6 +24,32 @@ void DatabricksCatalogSet::TryLoadEntries(ClientContext &context) {
 		throw;
 	}
 	is_loaded = true;
+}
+
+void DatabricksCatalogSet::TryLoadEntries(ClientContext &context) {
+	if (context.transaction.HasActiveTransaction()) {
+		Transaction::Get(context, catalog.GetAttached());
+	}
+	lock_guard<mutex> load_guard(load_lock);
+	LoadLocked(context);
+}
+
+void DatabricksCatalogSet::LoadInitial(ClientContext &context) {
+	lock_guard<mutex> load_guard(load_lock);
+	LoadLocked(context);
+}
+
+bool DatabricksCatalogSet::Contains(const string &name) {
+	lock_guard<mutex> guard(entry_lock);
+	if (entries.find(name) != entries.end()) {
+		return true;
+	}
+	for (auto &entry : ordered_entries) {
+		if (StringUtil::CIEquals(entry->name, name)) {
+			return true;
+		}
+	}
+	return false;
 }
 
 optional_ptr<CatalogEntry> DatabricksCatalogSet::GetEntry(ClientContext &context, const string &name) {
@@ -47,11 +69,16 @@ optional_ptr<CatalogEntry> DatabricksCatalogSet::GetEntry(ClientContext &context
 
 shared_ptr<CatalogEntry> DatabricksCatalogSet::GetEntryOwner(const string &name) {
 	lock_guard<mutex> guard(entry_lock);
-	auto entry = entries.find(name);
-	if (entry == entries.end()) {
-		return nullptr;
+	auto exact = entries.find(name);
+	if (exact != entries.end()) {
+		return exact->second;
 	}
-	return entry->second;
+	for (auto &entry : ordered_entries) {
+		if (StringUtil::CIEquals(entry->name, name)) {
+			return entry;
+		}
+	}
+	return nullptr;
 }
 
 void DatabricksCatalogSet::Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback) {
@@ -64,11 +91,6 @@ void DatabricksCatalogSet::Scan(ClientContext &context, const std::function<void
 	for (auto &entry : snapshot) {
 		callback(*entry);
 	}
-}
-
-bool DatabricksCatalogSet::IsLoaded() {
-	lock_guard<mutex> load_guard(load_lock);
-	return is_loaded;
 }
 
 void DatabricksCatalogSet::Erase(const string &name) {
@@ -96,12 +118,6 @@ void DatabricksCatalogSet::Erase(const string &name) {
 	vector<shared_ptr<CatalogEntry>> retired;
 	retired.push_back(std::move(removed));
 	catalog.Cast<DatabricksCatalog>().RetireEntries(std::move(retired));
-}
-
-void DatabricksCatalogSet::SeedEntry(unique_ptr<CatalogEntry> entry) {
-	CreateEntry(std::move(entry));
-	lock_guard<mutex> load_guard(load_lock);
-	is_loaded = true;
 }
 
 void DatabricksCatalogSet::ClearEntries() {

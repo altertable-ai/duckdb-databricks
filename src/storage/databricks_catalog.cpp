@@ -1,8 +1,6 @@
 #include "storage/databricks_catalog.hpp"
 
-#include "databricks_utils.hpp"
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
@@ -34,38 +32,14 @@ DatabricksCatalog::DatabricksCatalog(AttachedDatabase &db, DatabricksConfig conf
 	if (catalogs.rows.empty()) {
 		throw BinderException("Databricks catalog \"%s\" was not found", config.catalog);
 	}
-	if (options.schema.empty()) {
-		return;
-	}
-	auto schema_sql = "SELECT schema_name, comment FROM " + DatabricksQuoteIdentifier(config.catalog) +
-	                  ".information_schema.schemata";
-	auto schemata =
-	    session->Execute(context, DatabricksStatementMode::SMALL, schema_sql, config.catalog, GetDefaultSchema(), {});
-	string matched;
-	string comment;
-	for (idx_t row = 0; row < schemata.rows.size(); row++) {
-		auto name = session->Cell(schemata, row, "schema_name");
-		if (!name || StringUtil::CIEquals(*name, "information_schema")) {
-			continue;
-		}
-		if (*name != options.schema && !StringUtil::CIEquals(*name, options.schema)) {
-			continue;
-		}
-		if (matched.empty() || *name == options.schema) {
-			matched = *name;
-			auto comment_cell = session->Cell(schemata, row, "comment");
-			comment = comment_cell ? *comment_cell : "";
-		}
-		if (*name == options.schema) {
-			break;
+	auto requested_schema = options.schema;
+	if (!requested_schema.empty()) {
+		schemas.LoadInitial(context);
+		if (!schemas.Contains(requested_schema)) {
+			throw BinderException("Databricks schema \"%s\" was not found in catalog \"%s\"", requested_schema,
+			                      config.catalog);
 		}
 	}
-	if (matched.empty()) {
-		throw BinderException("Databricks schema \"%s\" was not found in catalog \"%s\"", options.schema,
-		                      config.catalog);
-	}
-	options.schema = matched;
-	schemas.Seed(matched, comment);
 }
 
 DatabricksCatalog::~DatabricksCatalog() = default;
@@ -120,8 +94,32 @@ void DatabricksCatalog::ThrowIfReadOnly() const {
 	}
 }
 
+DatabricksStatementResult DatabricksCatalog::ExecuteWrite(ClientContext &context, const string &sql,
+                                                          const string &schema) {
+	ThrowIfReadOnly();
+	auto result = session->Execute(context, DatabricksStatementMode::SMALL, sql, config.catalog, schema, {});
+	DatabricksTransaction::Get(context, *this).MarkWritten();
+	return result;
+}
+
 void DatabricksCatalog::ClearCache() {
 	schemas.ClearEntries();
+}
+
+void DatabricksCatalog::EraseSchema(const string &schema_name) {
+	schemas.Erase(schema_name);
+}
+
+void DatabricksCatalog::EraseTable(const string &schema_name, const string &table_name) {
+	auto owner = schemas.GetEntryOwner(schema_name);
+	if (!owner) {
+		return;
+	}
+	owner->Cast<DatabricksSchemaEntry>().EraseTable(table_name);
+}
+
+void DatabricksCatalog::NoteAttachedSchema(string canonical_name) {
+	options.schema = std::move(canonical_name);
 }
 
 void DatabricksCatalog::InvalidateTables(const string &schema_name) {
@@ -173,22 +171,20 @@ PhysicalOperator &DatabricksCatalog::PlanInsert(ClientContext &, PhysicalPlanGen
 	insert.children.push_back(*plan);
 	return insert;
 }
-PhysicalOperator &DatabricksCatalog::PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner,
-                                                LogicalDelete &op) {
+PhysicalOperator &DatabricksCatalog::PlanDelete(ClientContext &, PhysicalPlanGenerator &planner, LogicalDelete &op) {
 	ThrowIfReadOnly();
 	auto &table = op.table.Cast<DatabricksTableEntry>();
-	auto sql = DatabricksDml::DeleteSql(context, op);
+	auto sql = DatabricksDml::DeleteSql(op);
 	return planner.Make<DatabricksDml>(op, GetName(), table.schema.name, std::move(sql));
 }
 PhysicalOperator &DatabricksCatalog::PlanDelete(ClientContext &, PhysicalPlanGenerator &, LogicalDelete &,
                                                 PhysicalOperator &) {
 	ThrowWriteNotImplemented("DELETE");
 }
-PhysicalOperator &DatabricksCatalog::PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner,
-                                                LogicalUpdate &op) {
+PhysicalOperator &DatabricksCatalog::PlanUpdate(ClientContext &, PhysicalPlanGenerator &planner, LogicalUpdate &op) {
 	ThrowIfReadOnly();
 	auto &table = op.table.Cast<DatabricksTableEntry>();
-	auto sql = DatabricksDml::UpdateSql(context, op);
+	auto sql = DatabricksDml::UpdateSql(op);
 	return planner.Make<DatabricksDml>(op, GetName(), table.schema.name, std::move(sql));
 }
 PhysicalOperator &DatabricksCatalog::PlanUpdate(ClientContext &, PhysicalPlanGenerator &, LogicalUpdate &,

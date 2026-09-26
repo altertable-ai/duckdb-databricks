@@ -10,7 +10,6 @@
 #include "storage/databricks_catalog.hpp"
 #include "databricks_ddl.hpp"
 #include "storage/databricks_table_entry.hpp"
-#include "storage/databricks_transaction.hpp"
 
 namespace duckdb {
 
@@ -116,7 +115,6 @@ static void PrepareTarget(const DatabricksInsert &op, ClientContext &context, Da
 		}
 	}
 	DatabricksDdl::CreateTable(context, catalog, op.schema_name, info);
-	catalog.InvalidateTables(op.schema_name);
 	gstate.created = true;
 	idx_t source = 0;
 	for (auto &column : info.columns.Logical()) {
@@ -139,19 +137,18 @@ static void Flush(const DatabricksInsert &op, ClientContext &context, Databricks
 	auto sent = local.rows;
 	local.values.clear();
 	local.rows = 0;
+	auto &catalog = DatabricksCatalog::GetAttachedDatabase(context, op.catalog_name, "INSERT");
 	try {
-		gstate.session->Execute(context, DatabricksStatementMode::SMALL, sql, gstate.catalog, gstate.schema, {});
+		catalog.ExecuteWrite(context, sql, gstate.schema);
 	} catch (std::exception &ex) {
 		if (gstate.created) {
 			try {
-				auto &catalog = DatabricksCatalog::GetAttachedDatabase(context, op.catalog_name, "INSERT");
 				DropInfo drop;
 				drop.type = CatalogType::TABLE_ENTRY;
 				drop.schema = op.schema_name;
 				drop.name = op.table_name;
 				drop.if_not_found = OnEntryNotFound::RETURN_NULL;
 				DatabricksDdl::DropTable(context, catalog, drop);
-				catalog.InvalidateTables(op.schema_name);
 			} catch (std::exception &drop_error) {
 				DUCKDB_LOG_WARNING(context,
 				                   "Databricks CREATE TABLE AS failed and the new table could not be dropped: %s",
@@ -160,8 +157,6 @@ static void Flush(const DatabricksInsert &op, ClientContext &context, Databricks
 		}
 		throw;
 	}
-	auto &catalog = DatabricksCatalog::GetAttachedDatabase(context, op.catalog_name, "INSERT");
-	DatabricksTransaction::Get(context, catalog).MarkWritten();
 	gstate.rows_sent += sent;
 }
 

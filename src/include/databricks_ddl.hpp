@@ -11,7 +11,6 @@ struct CreateTableInfo;
 struct DropInfo;
 
 struct DatabricksDdl {
-	static void Execute(ClientContext &context, DatabricksCatalog &catalog, const string &sql);
 	static void CreateSchema(ClientContext &context, DatabricksCatalog &catalog, CreateSchemaInfo &info);
 	static void DropSchema(ClientContext &context, DatabricksCatalog &catalog, DropInfo &info);
 	static void CreateTable(ClientContext &context, DatabricksCatalog &catalog, const string &schema,

@@ -21,9 +21,6 @@ optional_ptr<CatalogEntry> DatabricksSchemaEntry::CreateTable(CatalogTransaction
                                                               BoundCreateTableInfo &info) {
 	auto &dbx_catalog = catalog.Cast<DatabricksCatalog>();
 	DatabricksDdl::CreateTable(transaction.GetContext(), dbx_catalog, name, info.Base());
-	if (info.Base().on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT || !tables.Remember(info.Base())) {
-		tables.ClearEntries();
-	}
 	return LookupEntry(transaction, EntryLookupInfo(CatalogType::TABLE_ENTRY, info.Base().table));
 }
 optional_ptr<CatalogEntry> DatabricksSchemaEntry::CreateFunction(CatalogTransaction, CreateFunctionInfo &) {
@@ -59,18 +56,24 @@ void DatabricksSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &inf
 		ThrowUseExecute("ALTER");
 	}
 	DatabricksDdl::Alter(transaction.GetContext(), catalog.Cast<DatabricksCatalog>(), info);
-	tables.ClearEntries();
 }
 void DatabricksSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 	if (info.type != CatalogType::TABLE_ENTRY) {
 		ThrowUseExecute("DROP " + CatalogTypeToString(info.type));
 	}
 	DatabricksDdl::DropTable(context, catalog.Cast<DatabricksCatalog>(), info);
-	tables.Forget(info.name);
 }
 
 void DatabricksSchemaEntry::InvalidateTables() {
 	tables.ClearEntries();
+}
+
+void DatabricksSchemaEntry::EraseTable(const string &table_name) {
+	tables.Erase(table_name);
+}
+
+shared_ptr<CatalogEntry> DatabricksSchemaEntry::GetTableOwner(const string &table_name) {
+	return tables.GetEntryOwner(table_name);
 }
 
 void DatabricksSchemaEntry::Scan(ClientContext &context, CatalogType type,

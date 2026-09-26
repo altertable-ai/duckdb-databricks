@@ -11,16 +11,6 @@ namespace duckdb {
 DatabricksSchemaSet::DatabricksSchemaSet(Catalog &catalog) : DatabricksCatalogSet(catalog) {
 }
 
-void DatabricksSchemaSet::Seed(const string &name, const string &comment) {
-	CreateSchemaInfo info;
-	info.schema = name;
-	info.internal = false;
-	if (!comment.empty()) {
-		info.comment = Value(comment);
-	}
-	SeedEntry(make_uniq<DatabricksSchemaEntry>(catalog, info));
-}
-
 static bool IsHiddenSchema(const string &name) {
 	return StringUtil::CIEquals(name, "information_schema");
 }
@@ -32,28 +22,50 @@ void DatabricksSchemaSet::LoadEntries(ClientContext &context) {
 	auto result =
 	    dbx_catalog.GetSession()->Execute(context, DatabricksStatementMode::SMALL, sql, dbx_catalog.GetConfig().catalog,
 	                                      dbx_catalog.GetDefaultSchema(), {});
-	auto &only_schema = dbx_catalog.GetAttachOptions().schema;
+	auto only_schema = dbx_catalog.GetAttachOptions().schema;
+	string matched;
+	string matched_comment;
+	auto add_schema = [&](const string &name, const string &comment) {
+		CreateSchemaInfo info;
+		info.schema = name;
+		info.internal = false;
+		if (!comment.empty()) {
+			info.comment = Value(comment);
+		}
+		CreateEntry(make_uniq<DatabricksSchemaEntry>(catalog, info));
+	};
 	for (idx_t row = 0; row < result.rows.size(); row++) {
 		auto name_cell = dbx_catalog.GetSession()->Cell(result, row, "schema_name");
 		if (!name_cell) {
 			continue;
 		}
 		auto name = *name_cell;
+		auto comment_cell = dbx_catalog.GetSession()->Cell(result, row, "comment");
+		auto comment = comment_cell ? *comment_cell : string();
 		if (!only_schema.empty()) {
-			if (name != only_schema) {
+			if (IsHiddenSchema(name) || (name != only_schema && !StringUtil::CIEquals(name, only_schema))) {
 				continue;
 			}
-		} else if (IsHiddenSchema(name)) {
+			if (matched.empty() || name == only_schema) {
+				matched = name;
+				matched_comment = std::move(comment);
+			}
+			if (name == only_schema) {
+				break;
+			}
 			continue;
 		}
-		CreateSchemaInfo info;
-		info.schema = name;
-		info.internal = false;
-		auto comment = dbx_catalog.GetSession()->Cell(result, row, "comment");
-		if (comment) {
-			info.comment = Value(*comment);
+		if (IsHiddenSchema(name)) {
+			continue;
 		}
-		CreateEntry(make_uniq<DatabricksSchemaEntry>(catalog, info));
+		add_schema(name, comment);
+	}
+	if (only_schema.empty() || matched.empty()) {
+		return;
+	}
+	add_schema(matched, matched_comment);
+	if (matched != only_schema) {
+		dbx_catalog.NoteAttachedSchema(matched);
 	}
 }
 

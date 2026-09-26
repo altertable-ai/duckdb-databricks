@@ -100,3 +100,22 @@ query I
 SELECT count(*) FROM databricks_query('db', 'SELECT `id` FROM `main`.`sales`.`orders` __multi__');
 ----
 3
+
+statement ok
+SET dbx_filter_pushdown=true;
+
+statement ok
+SET disabled_optimizers='expression_rewriter';
+
+query I
+SELECT count(*) FROM db.orders WHERE region LIKE 'a\%';
+----
+0
+
+query I
+SELECT count(*) > 0 FROM databricks_query('db', '__recorded__') WHERE contains(statement, e'LIKE \'a\\\\\\\\%\' ESCAPE');
+----
+true
+
+statement ok
+SET disabled_optimizers='';

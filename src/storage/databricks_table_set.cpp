@@ -1,13 +1,11 @@
 #include "storage/databricks_table_set.hpp"
 
-#include "databricks_literal.hpp"
 #include "databricks_statement.hpp"
 #include "databricks_types.hpp"
 #include "databricks_utils.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
-#include "duckdb/parser/parsed_data/create_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "storage/databricks_catalog.hpp"
 #include "storage/databricks_table_entry.hpp"
@@ -24,42 +22,6 @@ struct TableDefinition {
 	string comment;
 	vector<DatabricksColumn> columns;
 };
-
-bool DatabricksTableSet::Remember(CreateTableInfo &info) {
-	if (!IsLoaded()) {
-		return false;
-	}
-	auto copied = unique_ptr_cast<CreateInfo, CreateTableInfo>(info.Copy());
-	copied->schema = schema.name;
-	vector<DatabricksColumn> columns;
-	for (auto &column : copied->columns.Logical()) {
-		DatabricksColumn stored;
-		stored.name = column.Name();
-		stored.type = column.Type();
-		stored.type_text = DatabricksLiteral::TypeName(column.Type());
-		stored.nullable = true;
-		columns.push_back(std::move(stored));
-	}
-	for (auto &constraint : copied->constraints) {
-		if (constraint->type != ConstraintType::NOT_NULL) {
-			continue;
-		}
-		auto index = constraint->Cast<NotNullConstraint>().index.index;
-		if (index < columns.size()) {
-			columns[index].nullable = false;
-		}
-	}
-	Erase(copied->table);
-	CreateEntry(make_uniq<DatabricksTableEntry>(catalog, schema, *copied, std::move(columns), "TABLE", ""));
-	return true;
-}
-
-void DatabricksTableSet::Forget(const string &name) {
-	if (!IsLoaded()) {
-		return;
-	}
-	Erase(name);
-}
 
 void DatabricksTableSet::LoadEntries(ClientContext &context) {
 	auto &dbx_catalog = catalog.Cast<DatabricksCatalog>();

@@ -16,7 +16,6 @@
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "storage/databricks_catalog.hpp"
-#include "storage/databricks_transaction.hpp"
 
 namespace duckdb {
 
@@ -125,15 +124,7 @@ static string CreateTableSql(const DatabricksCatalog &catalog, const string &sch
 }
 
 static void Run(ClientContext &context, DatabricksCatalog &catalog, const string &sql) {
-	catalog.ThrowIfReadOnly();
-	catalog.GetSession()->Execute(context, DatabricksStatementMode::SMALL, sql, catalog.GetConfig().catalog,
-	                              catalog.GetDefaultSchema(), {});
-	DatabricksTransaction::Get(context, catalog).MarkWritten();
-}
-
-void DatabricksDdl::Execute(ClientContext &context, DatabricksCatalog &catalog, const string &sql) {
-	Run(context, catalog, sql);
-	catalog.ClearCache();
+	catalog.ExecuteWrite(context, sql, catalog.GetDefaultSchema());
 }
 
 void DatabricksDdl::CreateSchema(ClientContext &context, DatabricksCatalog &catalog, CreateSchemaInfo &info) {
@@ -144,7 +135,8 @@ void DatabricksDdl::CreateSchema(ClientContext &context, DatabricksCatalog &cata
 		throw NotImplementedException("CREATE OR REPLACE SCHEMA is not supported; use databricks_execute()");
 	}
 	sql += DatabricksQuoteIdentifier(catalog.GetConfig().catalog) + "." + DatabricksQuoteIdentifier(info.schema);
-	Execute(context, catalog, sql);
+	Run(context, catalog, sql);
+	catalog.ClearCache();
 }
 
 void DatabricksDdl::DropSchema(ClientContext &context, DatabricksCatalog &catalog, DropInfo &info) {
@@ -156,12 +148,14 @@ void DatabricksDdl::DropSchema(ClientContext &context, DatabricksCatalog &catalo
 	if (info.cascade) {
 		sql += " CASCADE";
 	}
-	Execute(context, catalog, sql);
+	Run(context, catalog, sql);
+	catalog.EraseSchema(info.name);
 }
 
 void DatabricksDdl::CreateTable(ClientContext &context, DatabricksCatalog &catalog, const string &schema,
                                 CreateTableInfo &info) {
 	Run(context, catalog, CreateTableSql(catalog, schema, info));
+	catalog.InvalidateTables(schema);
 }
 
 void DatabricksDdl::DropTable(ClientContext &context, DatabricksCatalog &catalog, DropInfo &info) {
@@ -171,6 +165,7 @@ void DatabricksDdl::DropTable(ClientContext &context, DatabricksCatalog &catalog
 	}
 	sql += DatabricksQualifiedName(catalog.GetConfig().catalog, info.schema, info.name);
 	Run(context, catalog, sql);
+	catalog.EraseTable(info.schema, info.name);
 }
 
 static string Qualified(const DatabricksCatalog &catalog, const AlterInfo &info) {
@@ -247,6 +242,7 @@ void DatabricksDdl::Alter(ClientContext &context, DatabricksCatalog &catalog, Al
 		    "This ALTER TABLE is not supported for Databricks tables; use databricks_execute()");
 	}
 	Run(context, catalog, sql);
+	catalog.InvalidateTables(info.schema);
 }
 
 } // namespace duckdb

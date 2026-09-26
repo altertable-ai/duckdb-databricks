@@ -17,22 +17,23 @@ public:
 
 	optional_ptr<CatalogEntry> GetEntry(ClientContext &context, const string &name);
 	shared_ptr<CatalogEntry> GetEntryOwner(const string &name);
+	//! Load once during ATTACH, before this database has a transaction manager.
+	void LoadInitial(ClientContext &context);
+	bool Contains(const string &name);
 	void Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback);
 	void ClearEntries();
-	bool IsLoaded();
 	//! Drop one cached entry. A set that was never loaded stays unloaded.
 	void Erase(const string &name);
 
 protected:
 	virtual void LoadEntries(ClientContext &context) = 0;
 	void CreateEntry(unique_ptr<CatalogEntry> entry);
-	//! Insert one entry and mark the set loaded, without a warehouse round trip.
-	void SeedEntry(unique_ptr<CatalogEntry> entry);
 
 	Catalog &catalog;
 
 private:
 	void TryLoadEntries(ClientContext &context);
+	void LoadLocked(ClientContext &context);
 
 	mutex load_lock;
 	mutex entry_lock;

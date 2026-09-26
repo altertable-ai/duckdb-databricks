@@ -11,10 +11,6 @@
 #include "duckdb/function/table/arrow.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/planner/expression/bound_between_expression.hpp"
-#include "duckdb/planner/expression/bound_columnref_expression.hpp"
-#include "duckdb/planner/expression/bound_constant_expression.hpp"
-#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
 #include <algorithm>
@@ -32,7 +28,8 @@ unique_ptr<FunctionData> DatabricksScanBindData::Copy() const {
 	result->result = this->result;
 	result->columns = columns;
 	result->table_entry = table_entry;
-	result->lifetime = lifetime;
+	result->table_lifetime = table_lifetime;
+	result->schema_lifetime = schema_lifetime;
 	result->filter_pushdown = filter_pushdown;
 	result->extra_filter = extra_filter;
 	result->order_by_clause = order_by_clause;
@@ -98,8 +95,7 @@ string DatabricksScanFunction::BuildQuery(const DatabricksScanBindData &bind_dat
 namespace {
 
 struct DatabricksScanGlobalState : public GlobalTableFunctionState {
-	shared_ptr<DatabricksSession> session;
-	DatabricksStatementResult result;
+	unique_ptr<DatabricksResultReader> reader;
 	atomic<idx_t> next_chunk {0};
 	vector<column_t> column_ids;
 	vector<idx_t> projection_ids;
@@ -129,18 +125,18 @@ optional_ptr<TableFilterSet> StaticScanFilters(TableFunctionInitInput &input) {
 unique_ptr<GlobalTableFunctionState> ScanInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->CastNoConst<DatabricksScanBindData>();
 	auto result = make_uniq<DatabricksScanGlobalState>();
-	result->session = bind_data.session;
 	result->column_ids = input.column_ids;
 	result->projection_ids = input.projection_ids;
 	if (bind_data.executed) {
-		result->result = bind_data.result;
+		result->reader = make_uniq<DatabricksResultReader>(bind_data.session, bind_data.result);
 		result->sql = bind_data.query;
 	} else {
 		result->sql = DatabricksScanFunction::BuildQuery(bind_data, input.column_ids, StaticScanFilters(input));
-		result->result = bind_data.session->Execute(context, DatabricksStatementMode::SCAN, result->sql,
+		auto statement = bind_data.session->Execute(context, DatabricksStatementMode::SCAN, result->sql,
 		                                            bind_data.catalog, bind_data.schema, {});
+		result->reader = make_uniq<DatabricksResultReader>(bind_data.session, std::move(statement));
 	}
-	auto chunks = std::max(result->result.total_chunk_count, idx_t(1));
+	auto chunks = std::max(result->reader->Result().total_chunk_count, idx_t(1));
 	if (bind_data.order_by_clause.empty()) {
 		auto threads = std::max(context.db->NumberOfThreads(), idx_t(1));
 		result->max_threads = std::min(chunks, threads);
@@ -163,11 +159,11 @@ bool LoadNextChunk(ClientContext &context, DatabricksScanGlobalState &global, Da
 	local.offset = 0;
 	while (true) {
 		auto chunk_index = global.next_chunk++;
-		if (chunk_index >= global.result.total_chunk_count) {
+		if (chunk_index >= global.reader->Result().total_chunk_count) {
 			local.exhausted = true;
 			return false;
 		}
-		auto payloads = global.session->DownloadChunk(context, global.result, chunk_index);
+		auto payloads = global.reader->Download(context, chunk_index);
 		for (auto &payload : payloads) {
 			auto decoded = DatabricksDecodeArrow(context, payload);
 			for (auto &batch : decoded) {
@@ -272,14 +268,6 @@ bool SupportsPushdownType(const FunctionData &bind_data_p, idx_t column_index) {
 	return DatabricksExpressions::SupportsFilterPushdown(bind_data.columns[column_index]);
 }
 
-static bool IsPrefixLikePattern(const string &pattern) {
-	if (pattern.empty() || pattern.back() != '%' || pattern.size() == 1) {
-		return false;
-	}
-	auto prefix = pattern.substr(0, pattern.size() - 1);
-	return prefix.find('%') == string::npos && prefix.find('_') == string::npos;
-}
-
 void PushdownComplexFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data_p,
                            vector<unique_ptr<Expression>> &filters) {
 	(void)context;
@@ -318,28 +306,8 @@ bool PushdownExpression(ClientContext &context, const LogicalGet &get, Expressio
 	if (!bind_data.filter_pushdown) {
 		return false;
 	}
-	if (expr.GetExpressionClass() == ExpressionClass::BOUND_BETWEEN) {
-		auto &between = expr.Cast<BoundBetweenExpression>();
-		return between.input->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-		       between.lower->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT &&
-		       between.upper->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT;
-	}
-	if (expr.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
-		auto &func = expr.Cast<BoundFunctionExpression>();
-		if (func.function.name != "~~" || func.children.size() < 2) {
-			return false;
-		}
-		if (func.children[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
-		    func.children[1]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
-			return false;
-		}
-		auto &constant = func.children[1]->Cast<BoundConstantExpression>();
-		if (constant.value.IsNull() || constant.value.type().id() != LogicalTypeId::VARCHAR) {
-			return false;
-		}
-		return IsPrefixLikePattern(StringValue::Get(constant.value));
-	}
-	return false;
+	string sql;
+	return DatabricksExpressions::TryTranslateExpression(bind_data.columns, get, expr, sql);
 }
 
 BindInfo GetBindInfo(const optional_ptr<FunctionData> bind_data_p) {

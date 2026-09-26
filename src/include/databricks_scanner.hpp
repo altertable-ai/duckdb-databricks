@@ -19,7 +19,9 @@ struct DatabricksScanBindData : public TableFunctionData {
 	DatabricksStatementResult result;
 	vector<DatabricksColumn> columns;
 	TableCatalogEntry *table_entry = nullptr;
-	shared_ptr<CatalogEntry> lifetime;
+	//! Keeps the table entry and its schema alive for prepared statements.
+	shared_ptr<CatalogEntry> table_lifetime;
+	shared_ptr<CatalogEntry> schema_lifetime;
 	bool filter_pushdown = false;
 	//! Predicate captured by pushdown_complex_filter, without a WHERE keyword.
 	string extra_filter;

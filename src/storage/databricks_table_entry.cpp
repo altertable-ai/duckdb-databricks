@@ -5,6 +5,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
 #include "storage/databricks_catalog.hpp"
+#include "storage/databricks_schema_entry.hpp"
 
 namespace duckdb {
 
@@ -35,8 +36,9 @@ TableFunction DatabricksTableEntry::GetScanFunction(ClientContext &context, uniq
 	auto result = make_uniq<DatabricksScanBindData>();
 	auto &dbx_catalog = catalog.Cast<DatabricksCatalog>();
 	result->session = dbx_catalog.GetSession();
-	result->table_entry = this;
-	result->lifetime = dbx_catalog.GetSchemaEntryOwner(schema.name);
+	result->schema_lifetime = dbx_catalog.GetSchemaEntryOwner(schema.name);
+	result->table_lifetime = schema.Cast<DatabricksSchemaEntry>().GetTableOwner(name);
+	result->table_entry = result->table_lifetime ? &result->table_lifetime->Cast<TableCatalogEntry>() : this;
 	result->catalog = dbx_catalog.GetConfig().catalog;
 	result->schema = schema.name;
 	result->table = name;

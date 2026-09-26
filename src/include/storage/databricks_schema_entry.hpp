@@ -29,6 +29,8 @@ public:
 	void DropEntry(ClientContext &context, DropInfo &info) override;
 	optional_ptr<CatalogEntry> LookupEntry(CatalogTransaction transaction, const EntryLookupInfo &lookup_info) override;
 	void InvalidateTables();
+	void EraseTable(const string &table_name);
+	shared_ptr<CatalogEntry> GetTableOwner(const string &table_name);
 
 private:
 	DatabricksTableSet tables;

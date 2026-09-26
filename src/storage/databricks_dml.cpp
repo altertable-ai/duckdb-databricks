@@ -15,7 +15,6 @@
 #include "duckdb/planner/operator/logical_update.hpp"
 #include "storage/databricks_catalog.hpp"
 #include "storage/databricks_table_entry.hpp"
-#include "storage/databricks_transaction.hpp"
 
 namespace duckdb {
 
@@ -53,7 +52,7 @@ static void CollectTarget(LogicalOperator &op, DmlTarget &target) {
 		CollectTarget(*op.children[0], target);
 		return;
 	default:
-		RejectDml("Joins");
+		RejectDml("Joins (USING or UPDATE FROM)");
 	}
 }
 
@@ -89,18 +88,12 @@ static string WhereSql(LogicalGet &get, const vector<DatabricksColumn> &columns,
 	return " WHERE " + StringUtil::Join(predicates, " AND ");
 }
 
-static bool QueryStartsWith(ClientContext &context, const string &keyword) {
-	auto query = StringUtil::Lower(context.GetCurrentQuery());
-	StringUtil::Trim(query);
-	return StringUtil::StartsWith(query, keyword);
-}
-
 static string QualifiedTable(const DatabricksTableEntry &table) {
 	auto &catalog = table.catalog.Cast<DatabricksCatalog>();
 	return DatabricksQualifiedName(catalog.GetConfig().catalog, table.schema.name, table.name);
 }
 
-string DatabricksDml::DeleteSql(ClientContext &context, LogicalDelete &op) {
+string DatabricksDml::DeleteSql(LogicalDelete &op) {
 	if (op.return_chunk) {
 		RejectDml("RETURNING");
 	}
@@ -108,26 +101,15 @@ string DatabricksDml::DeleteSql(ClientContext &context, LogicalDelete &op) {
 		RejectDml("DELETE");
 	}
 	DmlTarget target;
-	try {
-		CollectTarget(*op.children[0], target);
-	} catch (const NotImplementedException &) {
-		if (QueryStartsWith(context, "delete") &&
-		    StringUtil::Contains(StringUtil::Lower(context.GetCurrentQuery()), " using ")) {
-			RejectDml("USING");
-		}
-		throw;
-	}
+	CollectTarget(*op.children[0], target);
 	if (!target.get || !target.get->GetTable()) {
 		RejectDml("DELETE");
 	}
 	auto &table = target.get->GetTable()->Cast<DatabricksTableEntry>();
-	if (QueryStartsWith(context, "truncate") && target.filters.empty() && target.get->table_filters.filters.empty()) {
-		return "TRUNCATE TABLE " + QualifiedTable(table);
-	}
 	return "DELETE FROM " + QualifiedTable(table) + WhereSql(*target.get, table.GetColumns(), target.filters);
 }
 
-string DatabricksDml::UpdateSql(ClientContext &context, LogicalUpdate &op) {
+string DatabricksDml::UpdateSql(LogicalUpdate &op) {
 	if (op.return_chunk) {
 		RejectDml("RETURNING");
 	}
@@ -139,15 +121,7 @@ string DatabricksDml::UpdateSql(ClientContext &context, LogicalUpdate &op) {
 		RejectDml("UPDATE");
 	}
 	DmlTarget target;
-	try {
-		CollectTarget(*projection.children[0], target);
-	} catch (const NotImplementedException &) {
-		if (QueryStartsWith(context, "update") &&
-		    StringUtil::Contains(StringUtil::Lower(context.GetCurrentQuery()), " from ")) {
-			RejectDml("UPDATE FROM");
-		}
-		throw;
-	}
+	CollectTarget(*projection.children[0], target);
 	if (!target.get || !target.get->GetTable()) {
 		RejectDml("UPDATE");
 	}
@@ -188,9 +162,7 @@ SourceResultType DatabricksDml::GetDataInternal(ExecutionContext &context, DataC
                                                 OperatorSourceInput &input) const {
 	(void)input;
 	auto &catalog = DatabricksCatalog::GetAttachedDatabase(context.client, catalog_name, "DML");
-	auto result = catalog.GetSession()->Execute(context.client, DatabricksStatementMode::SMALL, sql,
-	                                            catalog.GetConfig().catalog, schema_name, {});
-	DatabricksTransaction::Get(context.client, catalog).MarkWritten();
+	auto result = catalog.ExecuteWrite(context.client, sql, schema_name);
 	idx_t affected = 0;
 	if (result.num_affected_rows.IsValid()) {
 		affected = result.num_affected_rows.GetIndex();
