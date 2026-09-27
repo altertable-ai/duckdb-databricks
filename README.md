@@ -1,6 +1,6 @@
 # Databricks extension for DuckDB
 
-Query a Databricks SQL warehouse from DuckDB. One `ATTACH` is one Unity Catalog catalog. The extension uses the [SQL Statement Execution API](https://docs.databricks.com/api/workspace/statementexecution) only: it does not read Delta files, and it does not open a Thrift session.
+Query a Databricks SQL warehouse from DuckDB. One `ATTACH` is one Unity Catalog catalog. The extension uses the [SQL Statement Execution API](https://docs.databricks.com/api/statement-execution/v1/statement-execution) only: it does not read Delta files, and it does not open a Thrift session.
 
 ```sql
 CREATE SECRET dbx (
@@ -60,16 +60,16 @@ Filters, `LIMIT`, and `ORDER BY ... LIMIT` are sent to the warehouse when `dbx_f
 
 ## Settings
 
-| Setting | Default | |
-| --- | --- | --- |
-| `dbx_filter_pushdown` | `true` | Send filters to the warehouse |
-| `dbx_order_pushdown` | `true` | Send `ORDER BY ... LIMIT` to the warehouse |
-| `dbx_insert_max_statement_bytes` | `12582912` | Maximum text of one `INSERT`. Hard cap 16 MiB |
-| `dbx_http_timeout_ms` | `60000` | Per-request HTTP timeout |
-| `dbx_http_retries` | `5` | Retries for HTTP 429, 503, and connection errors |
-| `dbx_statement_timeout_ms` | `0` | Cancel a statement that is still running after this many milliseconds. `0` waits |
-| `dbx_ca_cert` | `system` | PEM bundle to trust |
-| `dbx_debug_show_queries` | `false` | Print each statement text and id |
+| Setting                          | Default    |                                                                                  |
+| -------------------------------- | ---------- | -------------------------------------------------------------------------------- |
+| `dbx_filter_pushdown`            | `true`     | Send filters to the warehouse                                                    |
+| `dbx_order_pushdown`             | `true`     | Send `ORDER BY ... LIMIT` to the warehouse                                       |
+| `dbx_insert_max_statement_bytes` | `12582912` | Maximum text of one `INSERT`. Hard cap 16 MiB                                    |
+| `dbx_http_timeout_ms`            | `60000`    | Per-request HTTP timeout                                                         |
+| `dbx_http_retries`               | `5`        | Retries for HTTP 429, 503, and connection errors                                 |
+| `dbx_statement_timeout_ms`       | `0`        | Cancel a statement that is still running after this many milliseconds. `0` waits |
+| `dbx_ca_cert`                    | `system`   | PEM bundle to trust                                                              |
+| `dbx_debug_show_queries`         | `false`    | Print each statement text and id                                                 |
 
 Secrets redact `TOKEN` and `CLIENT_SECRET`. Errors name the HTTP step (`auth`, `submit`, `poll`, `chunk download`) and do not include authorization headers or the query string of a presigned URL.
 
