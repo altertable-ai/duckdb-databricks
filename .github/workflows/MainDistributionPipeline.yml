@@ -32,5 +32,68 @@ jobs:
       duckdb_version: v1.5.5
       ci_tools_version: v1.5-variegata
       extension_name: databricks
-      # Tidy configures without vcpkg, so curl, nlohmann-json, and Arrow are missing.
+      # Format is the lint check. The reusable tidy job configures without
+      # vcpkg, so clang-tidy runs in the tidy job below.
       format_checks: 'format'
+
+  tidy:
+    name: Tidy
+    runs-on: ubuntu-24.04
+    env:
+      GEN: ninja
+      TIDY_THREADS: 4
+      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+      VCPKG_TARGET_TRIPLET: x64-linux
+      VCPKG_BINARY_SOURCES: "clear;http,https://vcpkg-cache.duckdb.org,read"
+      # tidy-check does not pass VCPKG_MANIFEST_FLAGS. This points CMake at
+      # the extension manifest so curl, nlohmann-json, and Arrow are found.
+      EXT_DEBUG_FLAGS: -DVCPKG_MANIFEST_DIR=${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Free disk space
+        uses: endersonmenezes/free-disk-space@v2.1.1
+        continue-on-error: true
+        with:
+          remove_haskell: true
+          remove_tool_cache: true
+          remove_folders: "/usr/local/share/powershell /usr/share/swift"
+          testing: false
+      - name: Install
+        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build clang-tidy && sudo pip3 install pybind11[global] --break-system-packages
+      - name: Setup vcpkg
+        run: make -f extension-ci-tools/makefiles/vcpkg.Makefile setup-vcpkg
+      - name: Tidy
+        run: make tidy-check
+
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    env:
+      GEN: ninja
+      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+      VCPKG_TARGET_TRIPLET: x64-linux
+      VCPKG_BINARY_SOURCES: "clear;http,https://vcpkg-cache.duckdb.org,read"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Free disk space
+        uses: endersonmenezes/free-disk-space@v2.1.1
+        continue-on-error: true
+        with:
+          remove_haskell: true
+          remove_tool_cache: true
+          remove_folders: "/usr/local/share/powershell /usr/share/swift"
+          testing: false
+      - name: Install
+        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build cmake g++ python3-pip pkg-config zip unzip tar && sudo pip3 install pyarrow --break-system-packages
+      - name: Setup vcpkg
+        run: make -f extension-ci-tools/makefiles/vcpkg.Makefile setup-vcpkg
+      - name: Build
+        run: make release
+      - name: Test
+        run: make test
+      - name: Test fake
+        run: make test-fake

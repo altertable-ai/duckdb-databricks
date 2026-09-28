@@ -1,13 +1,10 @@
 name: Databricks smoke
 on:
-  schedule:
-    - cron: "0 4 * * *"
   workflow_dispatch:
 
 jobs:
   smoke:
     name: Warehouse smoke
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
