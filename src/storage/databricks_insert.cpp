@@ -13,7 +13,7 @@
 
 namespace duckdb {
 
-static constexpr idx_t INSERT_HARD_CAP = 16 * 1024 * 1024;
+static constexpr idx_t INSERT_HARD_CAP = static_cast<idx_t>(16) * 1024 * 1024;
 
 DatabricksInsert::DatabricksInsert(PhysicalPlan &physical_plan, LogicalOperator &op, DatabricksTableEntry &table,
                                    vector<DatabricksInsertColumn> columns_p)

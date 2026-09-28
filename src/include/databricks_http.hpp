@@ -9,7 +9,7 @@
 namespace duckdb {
 
 struct DatabricksHttpResponse {
-	long status = 0;
+	int64_t status = 0;
 	string body;
 	unordered_map<string, string> headers;
 	string curl_error;

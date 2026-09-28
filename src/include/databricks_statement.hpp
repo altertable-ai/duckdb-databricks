@@ -73,7 +73,7 @@ private:
 	                                     const string &url, const string &body, bool allow_auth_retry);
 	void Poll(ClientContext &context, DatabricksStatementResult &result, string &last_body);
 	void ParseStatement(const string &body, DatabricksStatementResult &result) const;
-	void ThrowApiError(const string &body, long status, const string &fallback_state) const;
+	void ThrowApiError(const string &body, int64_t status, const string &fallback_state) const;
 
 	DatabricksConfig config;
 	DatabricksAuth auth;

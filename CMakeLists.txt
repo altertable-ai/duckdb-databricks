@@ -20,7 +20,8 @@ target_link_libraries(
   databricks_ext PRIVATE CURL::libcurl OpenSSL::SSL OpenSSL::Crypto nlohmann_json::nlohmann_json
                          "$<IF:$<BOOL:${ARROW_BUILD_STATIC}>,Arrow::arrow_static,Arrow::arrow_shared>")
 
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+# clang-tidy invokes Clang, which rejects this GCC flag.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT CLANG_TIDY)
   foreach(databricks_target databricks_ext databricks_ext_storage)
     target_compile_options(${databricks_target} PRIVATE -fno-gnu-unique)
   endforeach()

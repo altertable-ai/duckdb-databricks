@@ -103,7 +103,7 @@ std::optional<string> DatabricksSession::Cell(const DatabricksStatementResult &r
 	throw InternalException("Databricks result has no column \"%s\"", column);
 }
 
-void DatabricksSession::ThrowApiError(const string &body, long status, const string &fallback_state) const {
+void DatabricksSession::ThrowApiError(const string &body, int64_t status, const string &fallback_state) const {
 	auto parsed = nlohmann::json::parse(body, nullptr, false);
 	string code = "HTTP";
 	string message = fallback_state.empty() ? "request failed" : fallback_state;
@@ -123,7 +123,7 @@ void DatabricksSession::ThrowApiError(const string &body, long status, const str
 			}
 		}
 	}
-	throw IOException("Databricks error %s: %s (HTTP %ld)", code, message, status);
+	throw IOException("Databricks error %s: %s (HTTP %lld)", code, message, static_cast<long long>(status));
 }
 
 void DatabricksSession::ParseStatement(const string &body, DatabricksStatementResult &result) const {
@@ -406,8 +406,8 @@ bool DatabricksResultReader::TryDownload(ClientContext &context, const vector<Da
 			return false;
 		}
 		if (response.status < 200 || response.status >= 300) {
-			throw IOException("Databricks transport error during chunk download: HTTP %ld for %s", response.status,
-			                  DatabricksRedactUrl(link.url));
+			throw IOException("Databricks transport error during chunk download: HTTP %lld for %s",
+			                  static_cast<long long>(response.status), DatabricksRedactUrl(link.url));
 		}
 		payloads.push_back(std::move(response.body));
 	}
