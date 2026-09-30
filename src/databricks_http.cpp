@@ -209,7 +209,9 @@ DatabricksHttpResponse DatabricksHttp::Request(ClientContext &context, const Dat
 			}
 			throw IOException("Databricks transport error during %s: %s", step, last.curl_error);
 		}
-		curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &response.status);
+		long status_code = 0; // NOLINT(google-runtime-int) curl writes a long
+		curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &status_code);
+		response.status = status_code;
 		if ((response.status == 429 || response.status == 503) && attempt < retries) {
 			auto delay = BackoffMs(attempt, response.headers);
 			last = std::move(response);

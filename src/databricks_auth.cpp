@@ -66,7 +66,8 @@ void DatabricksAuth::Refresh(ClientContext &context) {
 		if (!parsed.is_discarded() && parsed.contains("error_code") && parsed["error_code"].is_string()) {
 			code = parsed["error_code"].get<string>();
 		}
-		throw IOException("Databricks error %s: %s (HTTP %d)", code, message, response.status);
+		throw IOException("Databricks error %s: %s (HTTP %lld)", code, message,
+		                  static_cast<long long>(response.status));
 	}
 	auto parsed = nlohmann::json::parse(response.body, nullptr, false);
 	if (parsed.is_discarded() || !parsed.contains("access_token") || !parsed["access_token"].is_string()) {
