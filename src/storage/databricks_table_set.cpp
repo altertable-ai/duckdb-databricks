@@ -27,14 +27,14 @@ void DatabricksTableSet::LoadEntries(ClientContext &context) {
 	auto &dbx_catalog = catalog.Cast<DatabricksCatalog>();
 	auto catalog_name = dbx_catalog.GetConfig().catalog;
 	auto qualified = DatabricksQuoteIdentifier(catalog_name);
-	vector<DatabricksParameter> parameters = {{"schema", schema.name}};
+	vector<DatabricksParameter> parameters = {{"schema", schema.name.GetIdentifierName()}};
 	auto sql = "SELECT t.table_name, t.table_type, t.comment AS table_comment, c.column_name, c.ordinal_position, "
 	           "c.full_data_type, c.is_nullable, c.column_default, c.comment AS column_comment FROM " +
 	           qualified + ".information_schema.tables t LEFT JOIN " + qualified +
 	           ".information_schema.columns c ON t.table_schema = c.table_schema AND t.table_name = c.table_name "
 	           "WHERE t.table_schema = :schema ORDER BY t.table_name, c.ordinal_position";
 	auto rows = dbx_catalog.GetSession()->Execute(context, DatabricksStatementMode::SMALL, sql, catalog_name,
-	                                              schema.name, parameters);
+	                                              schema.name.GetIdentifierName(), parameters);
 	vector<TableDefinition> definitions;
 	unordered_map<string, idx_t> by_name;
 	for (idx_t row = 0; row < rows.rows.size(); row++) {
@@ -78,7 +78,7 @@ void DatabricksTableSet::LoadEntries(ClientContext &context) {
 		definitions[found->second].columns.push_back(std::move(column));
 	}
 	for (auto &definition : definitions) {
-		CreateTableInfo info(schema, definition.name);
+		CreateTableInfo info(schema, Identifier(definition.name));
 		if (!definition.comment.empty()) {
 			info.comment = Value(definition.comment);
 		}
@@ -95,7 +95,7 @@ void DatabricksTableSet::LoadEntries(ClientContext &context) {
 			}
 			seen.emplace(column.name, column.name);
 			auto index = info.columns.LogicalColumnCount();
-			ColumnDefinition column_def(column.name, column.type);
+			ColumnDefinition column_def(Identifier(column.name), column.type);
 			if (!column.comment.empty()) {
 				column_def.SetComment(Value(column.comment));
 			}

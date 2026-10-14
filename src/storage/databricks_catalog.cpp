@@ -1,8 +1,10 @@
 #include "storage/databricks_catalog.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/database_manager.hpp"
+#include "duckdb/parser/parsed_data/create_index_info.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/planner/binder.hpp"
@@ -28,7 +30,7 @@ DatabricksCatalog::DatabricksCatalog(AttachedDatabase &db, DatabricksConfig conf
 	config.ValidateAttach();
 	auto catalog_sql = "SELECT catalog_name FROM system.information_schema.catalogs WHERE catalog_name = :catalog";
 	auto catalogs = session->Execute(context, DatabricksStatementMode::SMALL, catalog_sql, config.catalog,
-	                                 GetDefaultSchema(), {{"catalog", config.catalog}});
+	                                 DefaultSchemaName(), {{"catalog", config.catalog}});
 	if (catalogs.rows.empty()) {
 		throw BinderException("Databricks catalog \"%s\" was not found", config.catalog);
 	}
@@ -46,7 +48,7 @@ DatabricksCatalog::~DatabricksCatalog() = default;
 
 DatabricksCatalog &DatabricksCatalog::GetAttachedDatabase(ClientContext &context, const string &database_name,
                                                           const string &function_name) {
-	auto database = DatabaseManager::Get(context).GetDatabase(context, database_name);
+	auto database = DatabaseManager::Get(context).GetDatabase(context, Identifier(database_name));
 	if (!database) {
 		throw BinderException("Failed to find attached database \"%s\" referenced in %s", database_name, function_name);
 	}
@@ -63,7 +65,7 @@ void DatabricksCatalog::Initialize(bool load_builtin) {
 
 optional_ptr<CatalogEntry> DatabricksCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
 	DatabricksDdl::CreateSchema(transaction.GetContext(), *this, info);
-	return schemas.GetEntry(transaction.GetContext(), info.schema);
+	return schemas.GetEntry(transaction.GetContext(), info.SchemaName().GetIdentifierName());
 }
 
 void DatabricksCatalog::DropSchema(ClientContext &context, DropInfo &info) {
@@ -147,7 +149,8 @@ PhysicalOperator &DatabricksCatalog::PlanCreateTableAs(ClientContext &context, P
 	(void)context;
 	ThrowIfReadOnly();
 	auto create_info = unique_ptr_cast<CreateInfo, CreateTableInfo>(std::move(op.info->base));
-	auto &insert = planner.Make<DatabricksInsert>(op, *this, op.schema.name, std::move(create_info));
+	auto &insert =
+	    planner.Make<DatabricksInsert>(op, *this, op.schema.name.GetIdentifierName(), std::move(create_info));
 	insert.children.push_back(plan);
 	return insert;
 }
@@ -166,7 +169,7 @@ PhysicalOperator &DatabricksCatalog::PlanInsert(ClientContext &, PhysicalPlanGen
 		throw NotImplementedException("INSERT is not supported for Databricks tables; use databricks_execute()");
 	}
 	auto &table = op.table.Cast<DatabricksTableEntry>();
-	auto columns = DatabricksInsert::GetInsertColumns(table, op.column_index_map);
+	auto columns = DatabricksInsert::GetInsertColumns(table, op);
 	auto &insert = planner.Make<DatabricksInsert>(op, table, std::move(columns));
 	insert.children.push_back(*plan);
 	return insert;
@@ -175,7 +178,8 @@ PhysicalOperator &DatabricksCatalog::PlanDelete(ClientContext &, PhysicalPlanGen
 	ThrowIfReadOnly();
 	auto &table = op.table.Cast<DatabricksTableEntry>();
 	auto sql = DatabricksDml::DeleteSql(op);
-	return planner.Make<DatabricksDml>(op, GetName(), table.schema.name, std::move(sql));
+	return planner.Make<DatabricksDml>(op, GetName().GetIdentifierName(), table.schema.name.GetIdentifierName(),
+	                                   std::move(sql));
 }
 PhysicalOperator &DatabricksCatalog::PlanDelete(ClientContext &, PhysicalPlanGenerator &, LogicalDelete &,
                                                 PhysicalOperator &) {
@@ -185,7 +189,8 @@ PhysicalOperator &DatabricksCatalog::PlanUpdate(ClientContext &, PhysicalPlanGen
 	ThrowIfReadOnly();
 	auto &table = op.table.Cast<DatabricksTableEntry>();
 	auto sql = DatabricksDml::UpdateSql(op);
-	return planner.Make<DatabricksDml>(op, GetName(), table.schema.name, std::move(sql));
+	return planner.Make<DatabricksDml>(op, GetName().GetIdentifierName(), table.schema.name.GetIdentifierName(),
+	                                   std::move(sql));
 }
 PhysicalOperator &DatabricksCatalog::PlanUpdate(ClientContext &, PhysicalPlanGenerator &, LogicalUpdate &,
                                                 PhysicalOperator &) {

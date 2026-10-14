@@ -21,7 +21,7 @@ static optional_ptr<LogicalGet> FindDatabricksScan(LogicalOperator &op) {
 		return nullptr;
 	}
 	auto &get = current.get().Cast<LogicalGet>();
-	if (get.function.name != "databricks_scan" || !get.bind_data) {
+	if (get.function.GetName() != "databricks_scan" || !get.bind_data) {
 		return nullptr;
 	}
 	return &get;
@@ -29,17 +29,22 @@ static optional_ptr<LogicalGet> FindDatabricksScan(LogicalOperator &op) {
 
 static bool AllFiltersPushed(LogicalGet &get, const DatabricksScanBindData &bind_data) {
 	if (!bind_data.filter_pushdown) {
-		return get.table_filters.filters.empty();
+		return !get.table_filters.HasFilters();
 	}
-	for (auto &entry : get.table_filters.filters) {
-		auto column_id = entry.first;
+	auto &column_ids = get.GetColumnIds();
+	for (auto &entry : get.table_filters) {
+		auto projection_index = entry.GetIndex().GetIndex();
+		if (projection_index >= column_ids.size()) {
+			return false;
+		}
+		auto column_id = column_ids[projection_index].GetPrimaryIndex();
 		if (IsVirtualColumn(column_id) || column_id >= bind_data.columns.size() ||
 		    !DatabricksExpressions::SupportsFilterPushdown(bind_data.columns[column_id])) {
 			return false;
 		}
 		try {
-			DatabricksExpressions::TransformFilter(DatabricksQuoteIdentifier(bind_data.columns[column_id].name),
-			                                       *entry.second);
+			auto &column = bind_data.columns[column_id];
+			DatabricksExpressions::TransformFilter(DatabricksQuoteIdentifier(column.name), entry.Filter(), column.type);
 		} catch (const NotImplementedException &) {
 			return false;
 		}
@@ -53,10 +58,10 @@ static string TraceColumn(Expression &expr, LogicalOperator &child, LogicalGet &
 		return string();
 	}
 	auto &column_ref = expr.Cast<BoundColumnRefExpression>();
-	if (column_ref.depth > 0) {
+	if (column_ref.Depth() > 0) {
 		return string();
 	}
-	auto binding = column_ref.binding;
+	auto binding = column_ref.Binding();
 	reference<LogicalOperator> current = child;
 	while (current.get().type == LogicalOperatorType::LOGICAL_PROJECTION) {
 		auto &projection = current.get().Cast<LogicalProjection>();
@@ -68,10 +73,10 @@ static string TraceColumn(Expression &expr, LogicalOperator &child, LogicalGet &
 			return string();
 		}
 		auto &inner = projected.Cast<BoundColumnRefExpression>();
-		if (inner.depth > 0) {
+		if (inner.Depth() > 0) {
 			return string();
 		}
-		binding = inner.binding;
+		binding = inner.Binding();
 		current = *current.get().children[0];
 	}
 	if (binding.table_index != get.table_index) {

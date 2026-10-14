@@ -136,6 +136,7 @@ unique_ptr<GlobalTableFunctionState> ScanInitGlobal(ClientContext &context, Tabl
 		                                            bind_data.catalog, bind_data.schema, {});
 		result->reader = make_uniq<DatabricksResultReader>(bind_data.session, std::move(statement));
 	}
+	bind_data.last_sql = result->sql;
 	auto chunks = std::max(result->reader->Result().total_chunk_count, idx_t(1));
 	if (bind_data.order_by_clause.empty()) {
 		auto threads = std::max(context.db->NumberOfThreads(), idx_t(1));
@@ -239,6 +240,9 @@ void ScanFunction(ClientContext &context, TableFunctionInput &data, DataChunk &o
 InsertionOrderPreservingMap<string> ScanToString(TableFunctionToStringInput &input) {
 	InsertionOrderPreservingMap<string> result;
 	auto &bind_data = input.bind_data->Cast<DatabricksScanBindData>();
+	if (!bind_data.last_sql.empty()) {
+		result["SQL"] = bind_data.last_sql;
+	}
 	if (bind_data.query.empty()) {
 		result["Table"] = bind_data.catalog + "." + bind_data.schema + "." + bind_data.table;
 	} else {
@@ -248,14 +252,6 @@ InsertionOrderPreservingMap<string> ScanToString(TableFunctionToStringInput &inp
 	StringUtil::Trim(pushed);
 	if (!pushed.empty()) {
 		result["Pushed Down"] = pushed;
-	}
-	return result;
-}
-
-InsertionOrderPreservingMap<string> ScanDynamicToString(TableFunctionDynamicToStringInput &input) {
-	InsertionOrderPreservingMap<string> result;
-	if (input.global_state) {
-		result["SQL"] = input.global_state->Cast<DatabricksScanGlobalState>().sql;
 	}
 	return result;
 }
@@ -310,12 +306,11 @@ bool PushdownExpression(ClientContext &context, const LogicalGet &get, Expressio
 	return DatabricksExpressions::TryTranslateExpression(bind_data.columns, get, expr, sql);
 }
 
-BindInfo GetBindInfo(const optional_ptr<FunctionData> bind_data_p) {
-	auto &bind_data = bind_data_p->Cast<DatabricksScanBindData>();
-	if (bind_data.table_entry) {
-		return BindInfo(*bind_data.table_entry);
+optional_ptr<TableCatalogEntry> GetTableEntry(optional_ptr<const FunctionData> bind_data_p) {
+	if (!bind_data_p) {
+		return nullptr;
 	}
-	return BindInfo(ScanType::EXTERNAL);
+	return bind_data_p->Cast<DatabricksScanBindData>().table_entry;
 }
 
 virtual_column_map_t GetVirtualColumns(ClientContext &context, optional_ptr<FunctionData> bind_data) {
@@ -333,8 +328,7 @@ void DatabricksScanFunction::SetScanCallbacks(TableFunction &function) {
 	function.init_local = ScanInitLocal;
 	function.function = ScanFunction;
 	function.to_string = ScanToString;
-	function.dynamic_to_string = ScanDynamicToString;
-	function.get_bind_info = GetBindInfo;
+	function.get_table_entry = GetTableEntry;
 	function.projection_pushdown = true;
 	function.filter_pushdown = true;
 	function.filter_prune = true;

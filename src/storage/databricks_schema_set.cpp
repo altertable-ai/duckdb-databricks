@@ -3,6 +3,7 @@
 #include "databricks_statement.hpp"
 #include "databricks_utils.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
+#include "duckdb/parser/qualified_name.hpp"
 #include "storage/databricks_catalog.hpp"
 #include "storage/databricks_schema_entry.hpp"
 
@@ -21,13 +22,13 @@ void DatabricksSchemaSet::LoadEntries(ClientContext &context) {
 	           ".information_schema.schemata";
 	auto result =
 	    dbx_catalog.GetSession()->Execute(context, DatabricksStatementMode::SMALL, sql, dbx_catalog.GetConfig().catalog,
-	                                      dbx_catalog.GetDefaultSchema(), {});
+	                                      dbx_catalog.DefaultSchemaName(), {});
 	auto only_schema = dbx_catalog.GetAttachOptions().schema;
 	string matched;
 	string matched_comment;
 	auto add_schema = [&](const string &name, const string &comment) {
 		CreateSchemaInfo info;
-		info.schema = name;
+		info.SetQualifiedName(QualifiedName({Identifier(name)}, Identifier()));
 		info.internal = false;
 		if (!comment.empty()) {
 			info.comment = Value(comment);
@@ -39,7 +40,7 @@ void DatabricksSchemaSet::LoadEntries(ClientContext &context) {
 		if (!name_cell) {
 			continue;
 		}
-		auto name = *name_cell;
+		auto &name = *name_cell;
 		auto comment_cell = dbx_catalog.GetSession()->Cell(result, row, "comment");
 		auto comment = comment_cell ? *comment_cell : string();
 		if (!only_schema.empty()) {

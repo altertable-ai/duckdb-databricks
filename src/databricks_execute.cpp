@@ -13,7 +13,7 @@ struct DatabricksExecuteData : public TableFunctionData {
 };
 
 static unique_ptr<FunctionData> ExecuteBind(ClientContext &context, TableFunctionBindInput &input,
-                                            vector<LogicalType> &return_types, vector<string> &names) {
+                                            vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (!Settings::Get<EnableExternalAccessSetting>(context)) {
 		throw PermissionException("Writing to Databricks is disabled through configuration");
 	}
@@ -36,11 +36,10 @@ static void ExecuteFunction(ClientContext &context, TableFunctionInput &input, D
 		return;
 	}
 	auto &catalog = DatabricksCatalog::GetAttachedDatabase(context, data.database_name, "databricks_execute");
-	catalog.ExecuteWrite(context, data.sql, catalog.GetDefaultSchema());
+	catalog.ExecuteWrite(context, data.sql, catalog.DefaultSchemaName());
 	catalog.ClearCache();
 	data.finished = true;
-	output.SetCardinality(1);
-	output.SetValue(0, 0, Value::BOOLEAN(true));
+	output.data[0].Append(Value::BOOLEAN(true));
 }
 
 DatabricksExecuteFunction::DatabricksExecuteFunction()

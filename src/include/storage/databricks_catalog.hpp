@@ -49,8 +49,11 @@ public:
 	string GetCatalogType() override {
 		return CATALOG_TYPE;
 	}
-	string GetDefaultSchema() const override {
+	string DefaultSchemaName() const {
 		return options.schema.empty() ? "default" : options.schema;
+	}
+	optional<Identifier> GetDefaultSchema() const override {
+		return Identifier(DefaultSchemaName());
 	}
 	optional_ptr<CatalogEntry> CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) override;
 	void ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) override;

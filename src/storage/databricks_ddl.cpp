@@ -4,52 +4,60 @@
 #include "databricks_utils.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/column_definition.hpp"
 #include "duckdb/parser/constraints/check_constraint.hpp"
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/parser/constraints/unique_constraint.hpp"
-#include "duckdb/parser/expression/cast_expression.hpp"
-#include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
+#include "duckdb/planner/binder.hpp"
+#include "duckdb/planner/expression_binder/constant_binder.hpp"
 #include "storage/databricks_catalog.hpp"
 
 namespace duckdb {
 
-static string RenderDefault(const ParsedExpression &expr) {
-	if (expr.GetExpressionClass() == ExpressionClass::CONSTANT) {
-		return DatabricksLiteral::Render(expr.Cast<ConstantExpression>().value);
+//! target_type INVALID keeps the expression's own type.
+static string RenderDefault(ClientContext &context, const ParsedExpression &expr, const LogicalType &target_type) {
+	auto expression = expr.Copy();
+	auto binder = Binder::CreateBinder(context);
+	ConstantBinder constant_binder(*binder, context, "DEFAULT value");
+	if (target_type.id() != LogicalTypeId::INVALID) {
+		constant_binder.target_type = target_type;
 	}
-	if (expr.GetExpressionClass() == ExpressionClass::CAST) {
-		auto &cast_expr = expr.Cast<CastExpression>();
-		if (cast_expr.child->GetExpressionClass() == ExpressionClass::CONSTANT) {
-			auto value = cast_expr.child->Cast<ConstantExpression>().value;
-			if (!value.IsNull()) {
-				value = value.DefaultCastAs(cast_expr.cast_type);
-			} else {
-				value = Value(cast_expr.cast_type);
-			}
-			return DatabricksLiteral::Render(value);
-		}
+	auto bound = constant_binder.Bind(expression);
+	// IsConsistent() rejects now() and similar, which are foldable within one query only
+	if (!bound->IsFoldable() || !bound->IsConsistent()) {
+		throw NotImplementedException("This DEFAULT expression is not a constant; create it with databricks_execute()");
 	}
-	throw NotImplementedException("This DEFAULT expression is not a constant; create it with databricks_execute()");
+	return DatabricksLiteral::Render(ExpressionExecutor::EvaluateScalar(context, *bound));
 }
 
-static string ColumnSql(const ColumnDefinition &column, bool not_null) {
+static string ColumnSql(ClientContext &context, const ColumnDefinition &column, bool not_null) {
 	auto sql = DatabricksQuoteIdentifier(column.Name()) + " " + DatabricksLiteral::TypeName(column.Type());
 	if (not_null) {
 		sql += " NOT NULL";
 	}
 	if (column.HasDefaultValue()) {
-		sql += " DEFAULT " + RenderDefault(column.DefaultValue());
+		sql += " DEFAULT " + RenderDefault(context, column.DefaultValue(), column.Type());
 	}
 	return sql;
 }
 
-static string CreateTableSql(const DatabricksCatalog &catalog, const string &schema, CreateTableInfo &info) {
+//! The column an ALTER COLUMN names. Struct field paths are not supported.
+static const Identifier &AlteredColumn(const vector<Identifier> &column_path) {
+	if (column_path.size() != 1) {
+		throw NotImplementedException(
+		    "Altering a struct field is not supported for Databricks tables; use databricks_execute()");
+	}
+	return column_path[0];
+}
+
+static string CreateTableSql(ClientContext &context, const DatabricksCatalog &catalog, const string &schema,
+                             CreateTableInfo &info) {
 	if (info.temporary) {
 		throw NotImplementedException("Temporary tables are not supported for Databricks; use databricks_execute()");
 	}
@@ -58,7 +66,7 @@ static string CreateTableSql(const DatabricksCatalog &catalog, const string &sch
 		                              "tables; use databricks_execute()");
 	}
 	unordered_set<idx_t> not_null;
-	vector<string> primary_key;
+	vector<Identifier> primary_key;
 	for (auto &constraint : info.constraints) {
 		switch (constraint->type) {
 		case ConstraintType::NOT_NULL:
@@ -96,14 +104,14 @@ static string CreateTableSql(const DatabricksCatalog &catalog, const string &sch
 	for (auto &column : info.columns.Logical()) {
 		any_default = any_default || column.HasDefaultValue();
 		auto required = not_null.find(column.Logical().index) != not_null.end();
-		columns.push_back(ColumnSql(column, required));
+		columns.push_back(ColumnSql(context, column, required));
 	}
 	if (!primary_key.empty()) {
 		vector<string> keys;
 		for (auto &key : primary_key) {
 			keys.push_back(DatabricksQuoteIdentifier(info.columns.GetColumn(key).Name()));
 		}
-		columns.push_back("CONSTRAINT " + DatabricksQuoteIdentifier(info.table + "_pk") + " PRIMARY KEY (" +
+		columns.push_back("CONSTRAINT " + DatabricksQuoteIdentifier(info.GetTableName() + "_pk") + " PRIMARY KEY (" +
 		                  StringUtil::Join(keys, ", ") + ")");
 	}
 	string sql = "CREATE ";
@@ -114,8 +122,8 @@ static string CreateTableSql(const DatabricksCatalog &catalog, const string &sch
 	if (info.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
 		sql += "IF NOT EXISTS ";
 	}
-	sql += DatabricksQualifiedName(catalog.GetConfig().catalog, schema, info.table) + " (" +
-	       StringUtil::Join(columns, ", ") + ") TBLPROPERTIES ('delta.columnMapping.mode' = 'name'";
+	sql += DatabricksQualifiedName(catalog.GetConfig().catalog, schema, info.GetTableName().GetIdentifierName()) +
+	       " (" + StringUtil::Join(columns, ", ") + ") TBLPROPERTIES ('delta.columnMapping.mode' = 'name'";
 	if (any_default) {
 		sql += ", 'delta.feature.allowColumnDefaults' = 'supported'";
 	}
@@ -124,7 +132,7 @@ static string CreateTableSql(const DatabricksCatalog &catalog, const string &sch
 }
 
 static void Run(ClientContext &context, DatabricksCatalog &catalog, const string &sql) {
-	catalog.ExecuteWrite(context, sql, catalog.GetDefaultSchema());
+	catalog.ExecuteWrite(context, sql, catalog.DefaultSchemaName());
 }
 
 void DatabricksDdl::CreateSchema(ClientContext &context, DatabricksCatalog &catalog, CreateSchemaInfo &info) {
@@ -134,7 +142,7 @@ void DatabricksDdl::CreateSchema(ClientContext &context, DatabricksCatalog &cata
 	} else if (info.on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {
 		throw NotImplementedException("CREATE OR REPLACE SCHEMA is not supported; use databricks_execute()");
 	}
-	sql += DatabricksQuoteIdentifier(catalog.GetConfig().catalog) + "." + DatabricksQuoteIdentifier(info.schema);
+	sql += DatabricksQuoteIdentifier(catalog.GetConfig().catalog) + "." + DatabricksQuoteIdentifier(info.SchemaName());
 	Run(context, catalog, sql);
 	catalog.ClearCache();
 }
@@ -144,46 +152,46 @@ void DatabricksDdl::DropSchema(ClientContext &context, DatabricksCatalog &catalo
 	if (info.if_not_found == OnEntryNotFound::RETURN_NULL) {
 		sql += "IF EXISTS ";
 	}
-	sql += DatabricksQuoteIdentifier(catalog.GetConfig().catalog) + "." + DatabricksQuoteIdentifier(info.name);
+	auto &schema_name = info.GetQualifiedName().Name().GetIdentifierName();
+	sql += DatabricksQuoteIdentifier(catalog.GetConfig().catalog) + "." + DatabricksQuoteIdentifier(schema_name);
 	if (info.cascade) {
 		sql += " CASCADE";
 	}
 	Run(context, catalog, sql);
-	catalog.EraseSchema(info.name);
+	catalog.EraseSchema(schema_name);
 }
 
 void DatabricksDdl::CreateTable(ClientContext &context, DatabricksCatalog &catalog, const string &schema,
                                 CreateTableInfo &info) {
-	Run(context, catalog, CreateTableSql(catalog, schema, info));
+	Run(context, catalog, CreateTableSql(context, catalog, schema, info));
 	catalog.InvalidateTables(schema);
 }
 
-void DatabricksDdl::DropTable(ClientContext &context, DatabricksCatalog &catalog, DropInfo &info) {
+void DatabricksDdl::DropTable(ClientContext &context, DatabricksCatalog &catalog, const string &schema,
+                              DropInfo &info) {
 	string sql = "DROP TABLE ";
 	if (info.if_not_found == OnEntryNotFound::RETURN_NULL) {
 		sql += "IF EXISTS ";
 	}
-	sql += DatabricksQualifiedName(catalog.GetConfig().catalog, info.schema, info.name);
+	auto &table_name = info.GetQualifiedName().Name().GetIdentifierName();
+	sql += DatabricksQualifiedName(catalog.GetConfig().catalog, schema, table_name);
 	Run(context, catalog, sql);
-	catalog.EraseTable(info.schema, info.name);
+	catalog.EraseTable(schema, table_name);
 }
 
-static string Qualified(const DatabricksCatalog &catalog, const AlterInfo &info) {
-	return DatabricksQualifiedName(catalog.GetConfig().catalog, info.schema, info.name);
-}
-
-void DatabricksDdl::Alter(ClientContext &context, DatabricksCatalog &catalog, AlterInfo &info) {
+void DatabricksDdl::Alter(ClientContext &context, DatabricksCatalog &catalog, const string &schema, AlterInfo &info) {
 	if (info.type != AlterType::ALTER_TABLE) {
 		throw NotImplementedException("ALTER %s is not supported for Databricks; use databricks_execute()",
 		                              EnumUtil::ToString(info.type));
 	}
 	auto &table = info.Cast<AlterTableInfo>();
-	auto qualified = Qualified(catalog, info);
+	auto qualified = DatabricksQualifiedName(catalog.GetConfig().catalog, schema,
+	                                         info.GetQualifiedName().Name().GetIdentifierName());
 	string sql;
 	switch (table.alter_table_type) {
 	case AlterTableType::ADD_COLUMN: {
 		auto &add = table.Cast<AddColumnInfo>();
-		sql = "ALTER TABLE " + qualified + " ADD COLUMN " + ColumnSql(add.new_column, false);
+		sql = "ALTER TABLE " + qualified + " ADD COLUMN " + ColumnSql(context, add.new_column, false);
 		if (add.if_column_not_exists) {
 			throw NotImplementedException("ADD COLUMN IF NOT EXISTS is not supported; use databricks_execute()");
 		}
@@ -211,29 +219,30 @@ void DatabricksDdl::Alter(ClientContext &context, DatabricksCatalog &catalog, Al
 	}
 	case AlterTableType::SET_NOT_NULL: {
 		auto &set = table.Cast<SetNotNullInfo>();
-		sql = "ALTER TABLE " + qualified + " ALTER COLUMN " + DatabricksQuoteIdentifier(set.column_name) +
-		      " SET NOT NULL";
+		sql = "ALTER TABLE " + qualified + " ALTER COLUMN " +
+		      DatabricksQuoteIdentifier(AlteredColumn(set.column_path)) + " SET NOT NULL";
 		break;
 	}
 	case AlterTableType::DROP_NOT_NULL: {
 		auto &drop = table.Cast<DropNotNullInfo>();
-		sql = "ALTER TABLE " + qualified + " ALTER COLUMN " + DatabricksQuoteIdentifier(drop.column_name) +
-		      " DROP NOT NULL";
+		sql = "ALTER TABLE " + qualified + " ALTER COLUMN " +
+		      DatabricksQuoteIdentifier(AlteredColumn(drop.column_path)) + " DROP NOT NULL";
 		break;
 	}
 	case AlterTableType::SET_DEFAULT: {
 		auto &set = table.Cast<SetDefaultInfo>();
-		sql = "ALTER TABLE " + qualified + " ALTER COLUMN " + DatabricksQuoteIdentifier(set.column_name);
+		sql = "ALTER TABLE " + qualified + " ALTER COLUMN " + DatabricksQuoteIdentifier(AlteredColumn(set.column_path));
 		if (!set.expression) {
 			sql += " DROP DEFAULT";
 		} else {
-			sql += " SET DEFAULT " + RenderDefault(*set.expression);
+			sql += " SET DEFAULT " + RenderDefault(context, *set.expression, LogicalType::INVALID);
 		}
 		break;
 	}
 	case AlterTableType::ALTER_COLUMN_TYPE: {
 		auto &change = table.Cast<ChangeColumnTypeInfo>();
-		sql = "ALTER TABLE " + qualified + " ALTER COLUMN " + DatabricksQuoteIdentifier(change.column_name) + " TYPE " +
+		sql = "ALTER TABLE " + qualified + " ALTER COLUMN " +
+		      DatabricksQuoteIdentifier(AlteredColumn(change.column_path)) + " TYPE " +
 		      DatabricksLiteral::TypeName(change.target_type);
 		break;
 	}
@@ -242,7 +251,7 @@ void DatabricksDdl::Alter(ClientContext &context, DatabricksCatalog &catalog, Al
 		    "This ALTER TABLE is not supported for Databricks tables; use databricks_execute()");
 	}
 	Run(context, catalog, sql);
-	catalog.InvalidateTables(info.schema);
+	catalog.InvalidateTables(schema);
 }
 
 } // namespace duckdb

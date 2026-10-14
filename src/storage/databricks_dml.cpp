@@ -59,7 +59,7 @@ static void CollectTarget(LogicalOperator &op, DmlTarget &target) {
 static string WhereSql(LogicalGet &get, const vector<DatabricksColumn> &columns,
                        const vector<reference<Expression>> &filters) {
 	vector<string> predicates;
-	if (!get.table_filters.filters.empty()) {
+	if (get.table_filters.HasFilters()) {
 		vector<column_t> column_ids;
 		for (auto &column_index : get.GetColumnIds()) {
 			column_ids.push_back(column_index.GetPrimaryIndex());
@@ -106,7 +106,25 @@ string DatabricksDml::DeleteSql(LogicalDelete &op) {
 		RejectDml("DELETE");
 	}
 	auto &table = target.get->GetTable()->Cast<DatabricksTableEntry>();
-	return "DELETE FROM " + QualifiedTable(table) + WhereSql(*target.get, table.GetColumns(), target.filters);
+	return "DELETE FROM " + QualifiedTable(table) + WhereSql(*target.get, table.GetDatabricksColumns(), target.filters);
+}
+
+//! SET col = DEFAULT is bound as a reference to the column's bound default. User values carry the alias set by
+//! DatabricksTableEntry::GetDefaultExpressionForColumn.
+static bool IsSetDefault(const LogicalUpdate &op, idx_t index, const Expression &expr, const Expression &value) {
+	if (value.GetExpressionClass() == ExpressionClass::BOUND_DEFAULT) {
+		return true;
+	}
+	if (expr.GetAlias() == DatabricksTableEntry::USER_ASSIGNMENT_ALIAS) {
+		return false;
+	}
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF &&
+	    expr.GetExpressionClass() != ExpressionClass::BOUND_REF) {
+		return false;
+	}
+	auto storage_index = op.columns[index].index;
+	return storage_index < op.bound_defaults.size() && op.bound_defaults[storage_index] &&
+	       value.Equals(*op.bound_defaults[storage_index]);
 }
 
 string DatabricksDml::UpdateSql(LogicalUpdate &op) {
@@ -135,27 +153,27 @@ string DatabricksDml::UpdateSql(LogicalUpdate &op) {
 		const Expression *value = &expr;
 		if (expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
 			auto &column_ref = expr.Cast<BoundColumnRefExpression>();
-			if (column_ref.binding.table_index != projection.table_index ||
-			    column_ref.binding.column_index >= projection.expressions.size()) {
+			if (column_ref.Binding().table_index != projection.table_index ||
+			    column_ref.Binding().column_index >= projection.expressions.size()) {
 				RejectDml("UPDATE");
 			}
-			value = projection.expressions[column_ref.binding.column_index].get();
+			value = projection.expressions[column_ref.Binding().column_index].get();
 		} else if (expr.GetExpressionClass() == ExpressionClass::BOUND_REF) {
 			auto &reference = expr.Cast<BoundReferenceExpression>();
-			if (reference.index >= projection.expressions.size()) {
+			if (reference.Index() >= projection.expressions.size()) {
 				RejectDml("UPDATE");
 			}
-			value = projection.expressions[reference.index].get();
+			value = projection.expressions[reference.Index()].get();
 		}
 		string rendered = "DEFAULT";
-		if (value->GetExpressionClass() != ExpressionClass::BOUND_DEFAULT) {
+		if (!IsSetDefault(op, i, expr, *value)) {
 			rendered = DatabricksExpressions::TranslateDml(*target.get, *value);
 		}
-		auto &column = table.TableCatalogEntry::GetColumns().GetColumn(op.columns[i]);
+		auto &column = table.GetColumns().GetColumn(op.columns[i]);
 		assignments.push_back(DatabricksQuoteIdentifier(column.Name()) + " = " + rendered);
 	}
 	return "UPDATE " + QualifiedTable(table) + " SET " + StringUtil::Join(assignments, ", ") +
-	       WhereSql(*target.get, table.GetColumns(), target.filters);
+	       WhereSql(*target.get, table.GetDatabricksColumns(), target.filters);
 }
 
 SourceResultType DatabricksDml::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
@@ -167,8 +185,7 @@ SourceResultType DatabricksDml::GetDataInternal(ExecutionContext &context, DataC
 	if (result.num_affected_rows.IsValid()) {
 		affected = result.num_affected_rows.GetIndex();
 	}
-	chunk.SetCardinality(1);
-	chunk.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(affected)));
+	chunk.data[0].Append(Value::BIGINT(NumericCast<int64_t>(affected)));
 	return SourceResultType::FINISHED;
 }
 

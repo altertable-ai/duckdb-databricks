@@ -15,8 +15,8 @@ struct DatabricksDdl {
 	static void DropSchema(ClientContext &context, DatabricksCatalog &catalog, DropInfo &info);
 	static void CreateTable(ClientContext &context, DatabricksCatalog &catalog, const string &schema,
 	                        CreateTableInfo &info);
-	static void DropTable(ClientContext &context, DatabricksCatalog &catalog, DropInfo &info);
-	static void Alter(ClientContext &context, DatabricksCatalog &catalog, AlterInfo &info);
+	static void DropTable(ClientContext &context, DatabricksCatalog &catalog, const string &schema, DropInfo &info);
+	static void Alter(ClientContext &context, DatabricksCatalog &catalog, const string &schema, AlterInfo &info);
 };
 
 } // namespace duckdb

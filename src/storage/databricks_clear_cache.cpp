@@ -11,7 +11,7 @@ struct DatabricksClearCacheData : public TableFunctionData {
 };
 
 static unique_ptr<FunctionData> ClearCacheBind(ClientContext &context, TableFunctionBindInput &input,
-                                               vector<LogicalType> &return_types, vector<string> &names) {
+                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
 	(void)context;
 	(void)input;
 	return_types.push_back(LogicalType::BOOLEAN);
@@ -37,8 +37,7 @@ static void ClearCacheFunction(ClientContext &context, TableFunctionInput &data_
 	}
 	DatabricksClearCacheFunction::ClearDatabricksCaches(context);
 	data.finished = true;
-	output.SetCardinality(1);
-	output.SetValue(0, 0, Value::BOOLEAN(true));
+	output.data[0].Append(Value::BOOLEAN(true));
 }
 
 DatabricksClearCacheFunction::DatabricksClearCacheFunction()
