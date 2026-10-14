@@ -45,7 +45,7 @@ bool DatabricksCatalogSet::Contains(const string &name) {
 		return true;
 	}
 	for (auto &entry : ordered_entries) {
-		if (StringUtil::CIEquals(entry->name, name)) {
+		if (StringUtil::CIEquals(entry->name.GetIdentifierName(), name)) {
 			return true;
 		}
 	}
@@ -60,7 +60,7 @@ optional_ptr<CatalogEntry> DatabricksCatalogSet::GetEntry(ClientContext &context
 		return exact->second.get();
 	}
 	for (auto &entry : ordered_entries) {
-		if (StringUtil::CIEquals(entry->name, name)) {
+		if (StringUtil::CIEquals(entry->name.GetIdentifierName(), name)) {
 			return entry.get();
 		}
 	}
@@ -74,7 +74,7 @@ shared_ptr<CatalogEntry> DatabricksCatalogSet::GetEntryOwner(const string &name)
 		return exact->second;
 	}
 	for (auto &entry : ordered_entries) {
-		if (StringUtil::CIEquals(entry->name, name)) {
+		if (StringUtil::CIEquals(entry->name.GetIdentifierName(), name)) {
 			return entry;
 		}
 	}
@@ -102,7 +102,7 @@ void DatabricksCatalogSet::Erase(const string &name) {
 			removed = exact->second;
 		} else {
 			for (auto &entry : ordered_entries) {
-				if (StringUtil::CIEquals(entry->name, name)) {
+				if (StringUtil::CIEquals(entry->name.GetIdentifierName(), name)) {
 					removed = entry;
 					break;
 				}
@@ -111,7 +111,7 @@ void DatabricksCatalogSet::Erase(const string &name) {
 		if (!removed) {
 			return;
 		}
-		entries.erase(removed->name);
+		entries.erase(removed->name.GetIdentifierName());
 		ordered_entries.erase(std::remove(ordered_entries.begin(), ordered_entries.end(), removed),
 		                      ordered_entries.end());
 	}
@@ -136,7 +136,7 @@ void DatabricksCatalogSet::ClearEntries() {
 void DatabricksCatalogSet::CreateEntry(unique_ptr<CatalogEntry> entry) {
 	shared_ptr<CatalogEntry> shared_entry(std::move(entry));
 	lock_guard<mutex> guard(entry_lock);
-	entries[shared_entry->name] = shared_entry;
+	entries[shared_entry->name.GetIdentifierName()] = shared_entry;
 	ordered_entries.push_back(std::move(shared_entry));
 }
 

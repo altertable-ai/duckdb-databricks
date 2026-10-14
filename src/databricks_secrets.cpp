@@ -2,6 +2,7 @@
 
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 
@@ -48,16 +49,17 @@ unique_ptr<BaseSecret> DatabricksSecrets::CreateFunction(ClientContext &context,
 		auto key = StringUtil::Lower(named_param.first);
 		auto value = named_param.second.ToString();
 		SetOption(validation, key, value);
-		result->secret_map[key] = Value(value);
+		result->secret_map[Identifier(key)] = Value(value);
 	}
 	validation.ValidateAuth();
-	result->redact_keys = {"token", "client_secret"};
+	result->redact_keys.insert(Identifier("token"));
+	result->redact_keys.insert(Identifier("client_secret"));
 	return std::move(result);
 }
 
 void DatabricksSecrets::SetSecretParameters(CreateSecretFunction &function) {
 	for (auto &name : SECRET_KEYS) {
-		function.named_parameters[name] = LogicalType::VARCHAR;
+		function.named_parameters[Identifier(name)] = LogicalType::VARCHAR;
 	}
 }
 
@@ -74,7 +76,7 @@ unique_ptr<SecretEntry> DatabricksSecrets::GetSecretEntry(ClientContext &context
 	}
 	if (entry->secret->GetType() != TYPE_NAME) {
 		throw BinderException("Secret \"%s\" is not a Databricks secret (it has type \"%s\")", name,
-		                      entry->secret->GetType());
+		                      entry->secret->GetType().GetIdentifierName());
 	}
 	return entry;
 }
@@ -82,7 +84,7 @@ unique_ptr<SecretEntry> DatabricksSecrets::GetSecretEntry(ClientContext &context
 void DatabricksSecrets::ApplySecret(const SecretEntry &entry, DatabricksConfig &config) {
 	auto &kv_secret = dynamic_cast<const KeyValueSecret &>(*entry.secret);
 	for (auto &item : kv_secret.secret_map) {
-		SetOption(config, item.first, item.second.ToString());
+		SetOption(config, item.first.GetIdentifierName(), item.second.ToString());
 	}
 }
 

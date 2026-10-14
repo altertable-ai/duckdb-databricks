@@ -2,10 +2,12 @@
 
 #include "duckdb/common/index_vector.hpp"
 #include "duckdb/execution/physical_operator.hpp"
+#include "duckdb/planner/logical_operator.hpp"
 
 namespace duckdb {
 class DatabricksCatalog;
 class DatabricksTableEntry;
+class LogicalInsert;
 struct CreateTableInfo;
 
 struct DatabricksInsertColumn {
@@ -22,6 +24,8 @@ public:
 
 	static vector<DatabricksInsertColumn> GetInsertColumns(DatabricksTableEntry &table,
 	                                                       const physical_index_vector_t<idx_t> &column_index_map);
+	//! Listed columns of an INSERT. The input has every physical column; omitted ones have no bound default.
+	static vector<DatabricksInsertColumn> GetInsertColumns(DatabricksTableEntry &table, const LogicalInsert &op);
 
 	string catalog_name;
 	string schema_name;

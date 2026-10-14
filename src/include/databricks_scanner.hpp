@@ -28,6 +28,8 @@ struct DatabricksScanBindData : public TableFunctionData {
 	//! Set by the optimizer. Includes the leading space.
 	string order_by_clause;
 	string limit_clause;
+	//! SQL of the latest scan, for EXPLAIN ANALYZE output.
+	mutable string last_sql;
 
 	unique_ptr<FunctionData> Copy() const override;
 	bool Equals(const FunctionData &other_p) const override;

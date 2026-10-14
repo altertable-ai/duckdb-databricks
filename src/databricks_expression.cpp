@@ -15,10 +15,9 @@
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
-#include "duckdb/planner/filter/conjunction_filter.hpp"
-#include "duckdb/planner/filter/constant_filter.hpp"
+#include "duckdb/function/scalar/tablefilter_functions.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
-#include "duckdb/planner/filter/in_filter.hpp"
+#include "duckdb/planner/table_filter_set.hpp"
 
 #include <functional>
 
@@ -114,7 +113,7 @@ static const Value *ConstantValue(const Expression &expr) {
 	if (expr.GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
 		return nullptr;
 	}
-	return &expr.Cast<BoundConstantExpression>().value;
+	return &expr.Cast<BoundConstantExpression>().GetValue();
 }
 
 static string BetweenSql(const string &input, const string &lower, const string &upper, bool lower_inclusive,
@@ -219,24 +218,25 @@ static string LikeSql(const Translator &translator, const vector<unique_ptr<Expr
 }
 
 static string FunctionSql(const Translator &translator, const BoundFunctionExpression &func) {
-	auto &name = func.function.name;
+	auto &name = func.Function().GetName().GetIdentifierName();
+	auto &children = func.GetChildren();
 	if (name == "+" || name == "-" || name == "*" || name == "/" || name == "%") {
-		if (func.children.size() == 1 && (name == "+" || name == "-")) {
-			return "(" + name + translator.Translate(*func.children[0]) + ")";
+		if (children.size() == 1 && (name == "+" || name == "-")) {
+			return "(" + name + translator.Translate(*children[0]) + ")";
 		}
-		if (func.children.size() == 2) {
-			return "(" + translator.Translate(*func.children[0]) + " " + name + " " +
-			       translator.Translate(*func.children[1]) + ")";
+		if (children.size() == 2) {
+			return "(" + translator.Translate(*children[0]) + " " + name + " " + translator.Translate(*children[1]) +
+			       ")";
 		}
 	}
 	if (name == "//" || name == "divide") {
-		if (func.children.size() != 2) {
+		if (children.size() != 2) {
 			translator.Fail("Function " + name);
 		}
-		return "div(" + JoinTranslated(translator, func.children) + ")";
+		return "div(" + JoinTranslated(translator, children) + ")";
 	}
 	if (name == "||") {
-		return "concat(" + JoinTranslated(translator, func.children) + ")";
+		return "concat(" + JoinTranslated(translator, children) + ")";
 	}
 	string databricks_name;
 	if (name == "lower" || name == "lcase") {
@@ -255,33 +255,35 @@ static string FunctionSql(const Translator &translator, const BoundFunctionExpre
 	} else if (name == "ceiling") {
 		databricks_name = "ceil";
 	} else if (name == "trim" || name == "ltrim" || name == "rtrim" || name == "concat" || name == "replace" ||
-	           name == "contains" || name == "abs" || name == "round" || name == "floor" || name == "ceil") {
+	           name == "contains" || name == "abs" || name == "round" || name == "floor" || name == "ceil" ||
+	           name == "isnan") {
 		databricks_name = name;
 	} else if (name == "~~" || name == "like_escape") {
-		return LikeSql(translator, func.children, "LIKE");
+		return LikeSql(translator, children, "LIKE");
 	} else if (name == "!~~" || name == "not_like_escape") {
-		return LikeSql(translator, func.children, "NOT LIKE");
+		return LikeSql(translator, children, "NOT LIKE");
 	} else if (name == "~~*" || name == "ilike_escape") {
-		return LikeSql(translator, func.children, "ILIKE");
+		return LikeSql(translator, children, "ILIKE");
 	} else if (name == "!~~*" || name == "not_ilike_escape") {
-		return LikeSql(translator, func.children, "NOT ILIKE");
+		return LikeSql(translator, children, "NOT ILIKE");
 	} else {
 		translator.Fail("Function " + name);
 	}
-	if ((name == "trim" || name == "ltrim" || name == "rtrim") && func.children.size() == 2) {
+	if ((name == "trim" || name == "ltrim" || name == "rtrim") && children.size() == 2) {
 		auto lead = name == "ltrim" ? "LEADING " : name == "rtrim" ? "TRAILING " : "";
-		return string("trim(") + lead + translator.Translate(*func.children[1]) + " FROM " +
-		       translator.Translate(*func.children[0]) + ")";
+		return string("trim(") + lead + translator.Translate(*children[1]) + " FROM " +
+		       translator.Translate(*children[0]) + ")";
 	}
-	return databricks_name + "(" + JoinTranslated(translator, func.children) + ")";
+	return databricks_name + "(" + JoinTranslated(translator, children) + ")";
 }
 
 static string TranslatePrefixLike(const Translator &translator, const BoundFunctionExpression &func) {
-	if (func.function.name != "~~" || func.children.size() < 2) {
+	auto &children = func.GetChildren();
+	if (func.Function().GetName().GetIdentifierName() != "~~" || children.size() < 2) {
 		translator.Fail("unsupported expression filter");
 	}
-	auto column = translator.resolve(*func.children[0]);
-	auto pattern = ConstantValue(*func.children[1]);
+	auto column = translator.resolve(*children[0]);
+	auto pattern = ConstantValue(*children[1]);
 	string prefix;
 	if (column.empty() || !pattern || pattern->IsNull() || pattern->type().id() != LogicalTypeId::VARCHAR ||
 	    !IsPrefixLike(StringValue::Get(*pattern), prefix)) {
@@ -291,42 +293,47 @@ static string TranslatePrefixLike(const Translator &translator, const BoundFunct
 	       DatabricksQuoteString("\\");
 }
 
-static string TranslateBetween(const Translator &translator, const BoundBetweenExpression &between) {
+static string TranslateBetween(const Translator &translator, const BoundFunctionExpression &between) {
+	auto &input_expr = BoundBetweenExpression::Input(between);
+	auto &lower_expr = BoundBetweenExpression::LowerBound(between);
+	auto &upper_expr = BoundBetweenExpression::UpperBound(between);
 	string input;
 	string lower;
 	string upper;
 	if (translator.policy == TranslatePolicy::FILTER) {
-		input = translator.resolve(*between.input);
-		auto lower_value = ConstantValue(*between.lower);
-		auto upper_value = ConstantValue(*between.upper);
+		input = translator.resolve(input_expr);
+		auto lower_value = ConstantValue(lower_expr);
+		auto upper_value = ConstantValue(upper_expr);
 		if (input.empty() || !lower_value || !upper_value || lower_value->IsNull() || upper_value->IsNull()) {
 			translator.Fail("unsupported BETWEEN");
 		}
 		lower = DatabricksExpressions::TransformConstant(*lower_value);
 		upper = DatabricksExpressions::TransformConstant(*upper_value);
 	} else {
-		input = translator.Translate(*between.input);
-		lower = translator.Translate(*between.lower);
-		upper = translator.Translate(*between.upper);
+		input = translator.Translate(input_expr);
+		lower = translator.Translate(lower_expr);
+		upper = translator.Translate(upper_expr);
 	}
-	return BetweenSql(input, lower, upper, between.lower_inclusive, between.upper_inclusive);
+	return BetweenSql(input, lower, upper, BoundBetweenExpression::LowerInclusive(between),
+	                  BoundBetweenExpression::UpperInclusive(between));
 }
 
-static string TranslateComparison(const Translator &translator, const BoundComparisonExpression &comparison) {
+static string TranslateComparison(const Translator &translator, const BoundFunctionExpression &comparison) {
+	auto &left = BoundComparisonExpression::Left(comparison);
+	auto &right = BoundComparisonExpression::Right(comparison);
 	if (translator.policy == TranslatePolicy::DML) {
-		return "(" + translator.Translate(*comparison.left) + " " +
-		       TransformComparison(comparison.GetExpressionType()) + " " + translator.Translate(*comparison.right) +
-		       ")";
+		return "(" + translator.Translate(left) + " " + TransformComparison(comparison.GetExpressionType()) + " " +
+		       translator.Translate(right) + ")";
 	}
 	const Expression *column_expr = nullptr;
 	const Expression *constant_expr = nullptr;
 	auto type = comparison.GetExpressionType();
-	if (comparison.right->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-		column_expr = comparison.left.get();
-		constant_expr = comparison.right.get();
-	} else if (comparison.left->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-		column_expr = comparison.right.get();
-		constant_expr = comparison.left.get();
+	if (right.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+		column_expr = &left;
+		constant_expr = &right;
+	} else if (left.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+		column_expr = &right;
+		constant_expr = &left;
 		type = FlipComparisonExpression(type);
 	} else {
 		translator.Fail("unsupported comparison");
@@ -335,42 +342,50 @@ static string TranslateComparison(const Translator &translator, const BoundCompa
 	if (column.empty()) {
 		translator.Fail("unsupported comparison");
 	}
-	auto &constant = constant_expr->Cast<BoundConstantExpression>().value;
+	auto &constant = constant_expr->Cast<BoundConstantExpression>().GetValue();
 	if (constant.IsNull()) {
 		return "1 = 0";
 	}
 	return column + " " + TransformComparison(type) + " " + DatabricksExpressions::TransformConstant(constant);
 }
 
+static string TranslateCast(const Translator &translator, const BoundFunctionExpression &cast_expr) {
+	if (translator.policy != TranslatePolicy::DML) {
+		translator.Fail("unsupported cast");
+	}
+	auto function = string(BoundCastExpression::IsTryCast(cast_expr) ? "TRY_CAST" : "CAST");
+	return function + "(" + translator.Translate(BoundCastExpression::Child(cast_expr)) + " AS " +
+	       DatabricksLiteral::TypeName(cast_expr.GetReturnType()) + ")";
+}
+
 static string TranslateOperator(const Translator &translator, const Expression &expr) {
-	auto &op_expr = expr.Cast<BoundOperatorExpression>();
+	auto &children = expr.Cast<BoundOperatorExpression>().GetChildren();
 	auto type = expr.GetExpressionType();
-	if (type == ExpressionType::OPERATOR_NOT && op_expr.children.size() == 1) {
-		return "NOT (" + translator.Translate(*op_expr.children[0]) + ")";
+	if (type == ExpressionType::OPERATOR_NOT && children.size() == 1) {
+		return "NOT (" + translator.Translate(*children[0]) + ")";
 	}
 	if ((type == ExpressionType::OPERATOR_IS_NULL || type == ExpressionType::OPERATOR_IS_NOT_NULL) &&
-	    op_expr.children.size() == 1) {
+	    children.size() == 1) {
 		auto keyword = type == ExpressionType::OPERATOR_IS_NULL ? " IS NULL" : " IS NOT NULL";
 		if (translator.policy == TranslatePolicy::FILTER) {
-			auto column = translator.resolve(*op_expr.children[0]);
+			auto column = translator.resolve(*children[0]);
 			if (column.empty()) {
 				translator.Fail("unsupported expression");
 			}
 			return column + keyword;
 		}
-		return "(" + translator.Translate(*op_expr.children[0]) + keyword + ")";
+		return "(" + translator.Translate(*children[0]) + keyword + ")";
 	}
-	if ((type == ExpressionType::COMPARE_IN || type == ExpressionType::COMPARE_NOT_IN) &&
-	    op_expr.children.size() >= 2) {
+	if ((type == ExpressionType::COMPARE_IN || type == ExpressionType::COMPARE_NOT_IN) && children.size() >= 2) {
 		auto keyword = type == ExpressionType::COMPARE_IN ? " IN (" : " NOT IN (";
 		if (translator.policy == TranslatePolicy::FILTER) {
-			auto column = translator.resolve(*op_expr.children[0]);
+			auto column = translator.resolve(*children[0]);
 			if (column.empty()) {
 				translator.Fail("unsupported expression");
 			}
 			vector<string> values;
-			for (idx_t i = 1; i < op_expr.children.size(); i++) {
-				auto constant = ConstantValue(*op_expr.children[i]);
+			for (idx_t i = 1; i < children.size(); i++) {
+				auto constant = ConstantValue(*children[i]);
 				if (!constant || constant->IsNull()) {
 					translator.Fail("unsupported IN");
 				}
@@ -379,13 +394,13 @@ static string TranslateOperator(const Translator &translator, const Expression &
 			return column + keyword + StringUtil::Join(values, ", ") + ")";
 		}
 		vector<string> values;
-		for (idx_t i = 1; i < op_expr.children.size(); i++) {
-			values.push_back(translator.Translate(*op_expr.children[i]));
+		for (idx_t i = 1; i < children.size(); i++) {
+			values.push_back(translator.Translate(*children[i]));
 		}
-		return "(" + translator.Translate(*op_expr.children[0]) + keyword + StringUtil::Join(values, ", ") + "))";
+		return "(" + translator.Translate(*children[0]) + keyword + StringUtil::Join(values, ", ") + "))";
 	}
 	if (translator.policy == TranslatePolicy::DML && type == ExpressionType::OPERATOR_COALESCE) {
-		return "coalesce(" + JoinTranslated(translator, op_expr.children) + ")";
+		return "coalesce(" + JoinTranslated(translator, children) + ")";
 	}
 	translator.Fail(translator.policy == TranslatePolicy::DML ? "This expression" : "unsupported expression");
 }
@@ -405,18 +420,7 @@ string Translator::Translate(const Expression &expr) const {
 		if (policy != TranslatePolicy::DML) {
 			Fail("unsupported constant");
 		}
-		return DatabricksLiteral::Render(expr.Cast<BoundConstantExpression>().value);
-	case ExpressionClass::BOUND_CAST: {
-		if (policy != TranslatePolicy::DML) {
-			Fail("unsupported cast");
-		}
-		auto &cast_expr = expr.Cast<BoundCastExpression>();
-		auto function = string(cast_expr.try_cast ? "TRY_CAST" : "CAST");
-		return function + "(" + Translate(*cast_expr.child) + " AS " +
-		       DatabricksLiteral::TypeName(cast_expr.return_type) + ")";
-	}
-	case ExpressionClass::BOUND_COMPARISON:
-		return TranslateComparison(*this, expr.Cast<BoundComparisonExpression>());
+		return DatabricksLiteral::Render(expr.Cast<BoundConstantExpression>().GetValue());
 	case ExpressionClass::BOUND_CONJUNCTION: {
 		auto &conjunction = expr.Cast<BoundConjunctionExpression>();
 		auto type = expr.GetExpressionType();
@@ -425,7 +429,7 @@ string Translator::Translate(const Expression &expr) const {
 		}
 		auto joiner = type == ExpressionType::CONJUNCTION_AND ? " AND " : " OR ";
 		vector<string> parts;
-		for (auto &child : conjunction.children) {
+		for (auto &child : conjunction.GetChildren()) {
 			parts.push_back(Translate(*child));
 		}
 		if (parts.empty()) {
@@ -433,25 +437,32 @@ string Translator::Translate(const Expression &expr) const {
 		}
 		return "(" + StringUtil::Join(parts, joiner) + ")";
 	}
-	case ExpressionClass::BOUND_BETWEEN:
-		return TranslateBetween(*this, expr.Cast<BoundBetweenExpression>());
 	case ExpressionClass::BOUND_CASE: {
 		if (policy != TranslatePolicy::DML) {
 			Fail("unsupported case");
 		}
 		auto &case_expr = expr.Cast<BoundCaseExpression>();
 		string sql = "CASE";
-		for (auto &check : case_expr.case_checks) {
+		for (auto &check : case_expr.CaseChecks()) {
 			sql += " WHEN " + Translate(*check.when_expr) + " THEN " + Translate(*check.then_expr);
 		}
-		if (case_expr.else_expr) {
-			sql += " ELSE " + Translate(*case_expr.else_expr);
+		if (case_expr.ElseExpression()) {
+			sql += " ELSE " + Translate(*case_expr.ElseExpression());
 		}
 		sql += " END";
 		return sql;
 	}
 	case ExpressionClass::BOUND_FUNCTION: {
 		auto &func = expr.Cast<BoundFunctionExpression>();
+		if (BoundComparisonExpression::IsComparison(func)) {
+			return TranslateComparison(*this, func);
+		}
+		if (func.GetExpressionType() == ExpressionType::COMPARE_BETWEEN) {
+			return TranslateBetween(*this, func);
+		}
+		if (BoundCastExpression::IsCast(func)) {
+			return TranslateCast(*this, func);
+		}
 		if (policy == TranslatePolicy::FILTER) {
 			return TranslatePrefixLike(*this, func);
 		}
@@ -471,19 +482,19 @@ static string ScanColumnSql(const vector<DatabricksColumn> &columns, const Logic
 		return string();
 	}
 	auto &column_ref = expr.Cast<BoundColumnRefExpression>();
-	if (column_ref.depth > 0 || column_ref.binding.table_index != get.table_index) {
+	if (column_ref.Depth() > 0 || column_ref.Binding().table_index != get.table_index) {
 		return string();
 	}
 	auto &column_ids = get.GetColumnIds();
-	if (column_ref.binding.column_index >= column_ids.size() ||
-	    column_ids[column_ref.binding.column_index].IsVirtualColumn()) {
+	if (column_ref.Binding().column_index >= column_ids.size() ||
+	    column_ids[column_ref.Binding().column_index].IsVirtualColumn()) {
 		return string();
 	}
-	auto column_id = column_ids[column_ref.binding.column_index].GetPrimaryIndex();
+	auto column_id = column_ids[column_ref.Binding().column_index].GetPrimaryIndex();
 	if (column_id >= columns.size()) {
 		return string();
 	}
-	auto &alias = column_ref.GetAlias();
+	auto &alias = column_ref.GetAlias().GetIdentifierName();
 	if (!alias.empty() && alias != columns[column_id].name) {
 		for (auto &candidate : column_ids) {
 			if (candidate.IsVirtualColumn()) {
@@ -505,19 +516,19 @@ static string ScanColumnSql(const vector<DatabricksColumn> &columns, const Logic
 static string DmlColumnSql(const LogicalGet &get, const Expression &expr) {
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
 		auto &column_ref = expr.Cast<BoundColumnRefExpression>();
-		if (column_ref.depth > 0) {
+		if (column_ref.Depth() > 0) {
 			throw NotImplementedException(
 			    "Subqueries is not supported for Databricks tables; use databricks_execute() with MERGE");
 		}
-		if (column_ref.binding.table_index != get.table_index) {
+		if (column_ref.Binding().table_index != get.table_index) {
 			throw NotImplementedException(
 			    "Joins is not supported for Databricks tables; use databricks_execute() with MERGE");
 		}
 		auto &column_ids = get.GetColumnIds();
-		if (column_ref.binding.column_index >= column_ids.size()) {
+		if (column_ref.Binding().column_index >= column_ids.size()) {
 			throw InternalException("Databricks DML column reference is out of range");
 		}
-		auto &column_index = column_ids[column_ref.binding.column_index];
+		auto &column_index = column_ids[column_ref.Binding().column_index];
 		if (column_index.IsVirtualColumn()) {
 			throw NotImplementedException(
 			    "rowid is not supported for Databricks tables; use databricks_execute() with MERGE");
@@ -529,91 +540,77 @@ static string DmlColumnSql(const LogicalGet &get, const Expression &expr) {
 	}
 	auto &reference = expr.Cast<BoundReferenceExpression>();
 	auto &column_ids = get.GetColumnIds();
-	if (!reference.GetAlias().empty()) {
+	auto &alias = reference.GetAlias().GetIdentifierName();
+	if (!alias.empty()) {
 		for (auto &column_index : column_ids) {
-			if (!column_index.IsVirtualColumn() && get.GetColumnName(column_index) == reference.GetAlias()) {
-				return DatabricksQuoteIdentifier(reference.GetAlias());
+			if (!column_index.IsVirtualColumn() && get.GetColumnName(column_index).GetIdentifierName() == alias) {
+				return DatabricksQuoteIdentifier(alias);
 			}
 		}
 	}
-	if (reference.index >= column_ids.size() || column_ids[reference.index].IsVirtualColumn()) {
+	if (reference.Index() >= column_ids.size() || column_ids[reference.Index()].IsVirtualColumn()) {
 		throw NotImplementedException(
 		    "rowid is not supported for Databricks tables; use databricks_execute() with MERGE");
 	}
-	return DatabricksQuoteIdentifier(get.GetColumnName(column_ids[reference.index]));
+	return DatabricksQuoteIdentifier(get.GetColumnName(column_ids[reference.Index()]));
 }
 
-string DatabricksExpressions::TransformFilter(const string &column, const TableFilter &filter) {
-	switch (filter.filter_type) {
-	case TableFilterType::IS_NULL:
-		return column + " IS NULL";
-	case TableFilterType::IS_NOT_NULL:
-		return column + " IS NOT NULL";
-	case TableFilterType::CONSTANT_COMPARISON: {
-		auto &constant_filter = filter.Cast<ConstantFilter>();
-		if (constant_filter.constant.IsNull()) {
-			return "1 = 0";
-		}
-		return column + " " + TransformComparison(constant_filter.comparison_type) + " " +
-		       TransformConstant(constant_filter.constant);
+static bool IsRuntimeHint(const Expression &expr) {
+	return ExpressionFilter::ContainsInternalFunction(expr, TableFilterDynamicFun::Name) ||
+	       ExpressionFilter::ContainsInternalFunction(expr, TableFilterBloomFilterFun::Name) ||
+	       ExpressionFilter::ContainsInternalFunction(expr, TableFilterPrefixRangeFun::Name);
+}
+
+static string TransformFilterExpression(const string &column, const Expression &expr) {
+	if (ExpressionFilter::IsOptionalExpression(expr) || ExpressionFilter::IsRootOptionalExpression(expr)) {
+		return string();
 	}
-	case TableFilterType::IN_FILTER: {
-		auto &in_filter = filter.Cast<InFilter>();
-		vector<string> values;
-		for (auto &value : in_filter.values) {
-			if (value.IsNull()) {
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) {
+		auto is_and = expr.GetExpressionType() == ExpressionType::CONJUNCTION_AND;
+		vector<string> parts;
+		for (auto &child : expr.Cast<BoundConjunctionExpression>().GetChildren()) {
+			auto part = TransformFilterExpression(column, *child);
+			if (part.empty()) {
+				if (!is_and) {
+					return string();
+				}
 				continue;
 			}
-			values.push_back(TransformConstant(value));
-		}
-		if (values.empty()) {
-			return "1 = 0";
-		}
-		return column + " IN (" + StringUtil::Join(values, ", ") + ")";
-	}
-	case TableFilterType::CONJUNCTION_AND: {
-		auto &conjunction = filter.Cast<ConjunctionAndFilter>();
-		vector<string> parts;
-		for (auto &child : conjunction.child_filters) {
-			auto part = TransformFilter(column, *child);
-			if (!part.empty()) {
-				parts.push_back(part);
-			}
+			parts.push_back(part);
 		}
 		if (parts.empty()) {
 			return string();
 		}
-		return "(" + StringUtil::Join(parts, " AND ") + ")";
+		return "(" + StringUtil::Join(parts, is_and ? " AND " : " OR ") + ")";
 	}
-	case TableFilterType::CONJUNCTION_OR: {
-		auto &conjunction = filter.Cast<ConjunctionOrFilter>();
-		vector<string> parts;
-		for (auto &child : conjunction.child_filters) {
-			auto part = TransformFilter(column, *child);
-			if (part.empty()) {
-				return string();
-			}
-			parts.push_back(part);
-		}
-		return "(" + StringUtil::Join(parts, " OR ") + ")";
-	}
-	case TableFilterType::OPTIONAL_FILTER:
-	case TableFilterType::DYNAMIC_FILTER:
-	case TableFilterType::BLOOM_FILTER:
+	if (IsRuntimeHint(expr)) {
 		return string();
-	case TableFilterType::EXPRESSION_FILTER: {
-		auto &expression_filter = filter.Cast<ExpressionFilter>();
-		Translator translator {TranslatePolicy::FILTER, [&](const Expression &child) {
-			                       if (child.GetExpressionClass() == ExpressionClass::BOUND_REF) {
-				                       return column;
-			                       }
-			                       return string();
-		                       }};
-		return translator.Translate(*expression_filter.expr);
 	}
+	Translator translator {TranslatePolicy::FILTER, [&](const Expression &child) {
+		                       if (ExpressionFilter::IsSimpleFilterColumnRef(child)) {
+			                       return column;
+		                       }
+		                       return string();
+	                       }};
+	return translator.Translate(expr);
+}
+
+string DatabricksExpressions::TransformFilter(const string &column, const TableFilter &filter,
+                                              const LogicalType &column_type) {
+	switch (filter.filter_type) {
+	case TableFilterType::EXPRESSION_FILTER:
+		if (ExpressionFilter::IsOptionalFilter(filter) || ExpressionFilter::IsRootOptionalFilter(filter) ||
+		    ExpressionFilter::GetRootOptionalDynamicFilterData(filter)) {
+			return string();
+		}
+		return TransformFilterExpression(column, *ExpressionFilter::GetExpressionFilter(filter, "databricks").expr);
+	case TableFilterType::LEGACY_OPTIONAL_FILTER:
+	case TableFilterType::LEGACY_DYNAMIC_FILTER:
+	case TableFilterType::LEGACY_BLOOM_FILTER:
+	case TableFilterType::LEGACY_PREFIX_RANGE_FILTER:
+		return string();
 	default:
-		throw NotImplementedException("Databricks filter pushdown: unsupported filter type %s",
-		                              EnumUtil::ToString(filter.filter_type));
+		return TransformFilterExpression(column, *ExpressionFilter::FromTableFilter(filter, column_type)->expr);
 	}
 }
 
@@ -639,20 +636,24 @@ string DatabricksExpressions::TranslateDml(const LogicalGet &get, const Expressi
 
 string DatabricksExpressions::TransformFilters(const vector<column_t> &column_ids, optional_ptr<TableFilterSet> filters,
                                                const vector<DatabricksColumn> &columns) {
-	if (!filters || filters->filters.empty()) {
+	if (!filters || !filters->HasFilters()) {
 		return string();
 	}
-	(void)column_ids;
 	vector<string> conditions;
-	for (auto &entry : filters->filters) {
-		auto column_id = entry.first;
+	for (auto &entry : *filters) {
+		auto projection_index = entry.GetIndex().GetIndex();
+		if (projection_index >= column_ids.size()) {
+			throw InternalException("Databricks filter pushdown: filter on unknown projection %llu", projection_index);
+		}
+		auto column_id = column_ids[projection_index];
 		if (IsVirtualColumn(column_id)) {
 			throw InternalException("Databricks filter pushdown: unexpected filter on a virtual column");
 		}
 		if (column_id >= columns.size()) {
 			throw InternalException("Databricks filter pushdown: column id %llu is out of range", column_id);
 		}
-		auto condition = TransformFilter(DatabricksQuoteIdentifier(columns[column_id].name), *entry.second);
+		auto &column = columns[column_id];
+		auto condition = TransformFilter(DatabricksQuoteIdentifier(column.name), entry.Filter(), column.type);
 		if (!condition.empty()) {
 			conditions.push_back(condition);
 		}

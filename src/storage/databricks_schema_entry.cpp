@@ -20,8 +20,9 @@ DatabricksSchemaEntry::DatabricksSchemaEntry(Catalog &catalog, CreateSchemaInfo 
 optional_ptr<CatalogEntry> DatabricksSchemaEntry::CreateTable(CatalogTransaction transaction,
                                                               BoundCreateTableInfo &info) {
 	auto &dbx_catalog = catalog.Cast<DatabricksCatalog>();
-	DatabricksDdl::CreateTable(transaction.GetContext(), dbx_catalog, name, info.Base());
-	return LookupEntry(transaction, EntryLookupInfo(CatalogType::TABLE_ENTRY, info.Base().table));
+	DatabricksDdl::CreateTable(transaction.GetContext(), dbx_catalog, name.GetIdentifierName(), info.Base());
+	return LookupEntry(transaction,
+	                   EntryLookupInfo(CatalogType::TABLE_ENTRY, QualifiedName(info.Base().GetTableName())));
 }
 optional_ptr<CatalogEntry> DatabricksSchemaEntry::CreateFunction(CatalogTransaction, CreateFunctionInfo &) {
 	ThrowUseExecute("Functions and macros");
@@ -55,13 +56,13 @@ void DatabricksSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &inf
 	if (info.type != AlterType::ALTER_TABLE) {
 		ThrowUseExecute("ALTER");
 	}
-	DatabricksDdl::Alter(transaction.GetContext(), catalog.Cast<DatabricksCatalog>(), info);
+	DatabricksDdl::Alter(transaction.GetContext(), catalog.Cast<DatabricksCatalog>(), name.GetIdentifierName(), info);
 }
 void DatabricksSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 	if (info.type != CatalogType::TABLE_ENTRY) {
 		ThrowUseExecute("DROP " + CatalogTypeToString(info.type));
 	}
-	DatabricksDdl::DropTable(context, catalog.Cast<DatabricksCatalog>(), info);
+	DatabricksDdl::DropTable(context, catalog.Cast<DatabricksCatalog>(), name.GetIdentifierName(), info);
 }
 
 void DatabricksSchemaEntry::InvalidateTables() {

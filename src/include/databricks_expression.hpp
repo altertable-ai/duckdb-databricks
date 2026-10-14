@@ -3,6 +3,7 @@
 #include "databricks_types.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/table_filter.hpp"
+#include "duckdb/planner/table_filter_set.hpp"
 
 namespace duckdb {
 class LogicalGet;
@@ -12,11 +13,11 @@ public:
 	//! True when a filter on this column can be sent to Databricks and not re-checked locally.
 	static bool SupportsFilterPushdown(const DatabricksColumn &column);
 	//! WHERE body. Empty when no pushed filter restricts rows.
-	//! filters is keyed by the table column id. Use the static filter set, not dynamic join hints.
+	//! filters is keyed by position in column_ids. Use the static filter set, not dynamic join hints.
 	static string TransformFilters(const vector<column_t> &column_ids, optional_ptr<TableFilterSet> filters,
 	                               const vector<DatabricksColumn> &columns);
-	//! Empty for optional, dynamic, and bloom filters. Throws when a required filter cannot be translated.
-	static string TransformFilter(const string &column, const TableFilter &filter);
+	//! Empty for optional filters and runtime hints. Throws when a required filter cannot be translated.
+	static string TransformFilter(const string &column, const TableFilter &filter, const LogicalType &column_type);
 	static string TransformConstant(const Value &value);
 	//! Translates a filter expression DuckDB would otherwise keep locally (IN, OR, NOT, BETWEEN, prefix LIKE).
 	//! Returns false when the expression must stay in DuckDB.

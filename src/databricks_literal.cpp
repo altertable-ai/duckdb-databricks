@@ -68,6 +68,7 @@ string DatabricksLiteral::TypeName(const LogicalType &type) {
 		return "ARRAY<" + TypeName(ListType::GetChildType(type)) + ">";
 	case LogicalTypeId::MAP:
 		return "MAP<" + TypeName(MapType::KeyType(type)) + ", " + TypeName(MapType::ValueType(type)) + ">";
+	case LogicalTypeId::TUPLE:
 	case LogicalTypeId::STRUCT: {
 		auto count = StructType::GetChildCount(type);
 		vector<string> fields;
@@ -171,7 +172,7 @@ string DatabricksLiteral::Render(const Value &value) {
 		return RenderBlob(StringValue::Get(value));
 	case LogicalTypeId::DATE: {
 		auto date = DateValue::Get(value);
-		if (!Date::IsFinite(date)) {
+		if (!date.IsFinite()) {
 			throw InvalidInputException("Databricks date is out of range");
 		}
 		int32_t year, month, day;
@@ -183,17 +184,17 @@ string DatabricksLiteral::Render(const Value &value) {
 	}
 	case LogicalTypeId::TIMESTAMP: {
 		auto timestamp = TimestampValue::Get(value);
-		if (!Timestamp::IsFinite(timestamp)) {
+		if (!timestamp.IsFinite()) {
 			throw InvalidInputException("Databricks timestamp is out of range");
 		}
 		return "TIMESTAMP_NTZ" + DatabricksQuoteString(Timestamp::ToString(timestamp));
 	}
 	case LogicalTypeId::TIMESTAMP_TZ: {
 		auto timestamp = TimestampTZValue::Get(value);
-		if (!Timestamp::IsFinite(timestamp)) {
+		if (!timestamp.IsFinite()) {
 			throw InvalidInputException("Databricks timestamp is out of range");
 		}
-		return "TIMESTAMP" + DatabricksQuoteString(Timestamp::ToString(timestamp) + "+00:00");
+		return "TIMESTAMP" + DatabricksQuoteString(Timestamp::ToString(timestamp_t(timestamp.value)) + "+00:00");
 	}
 	case LogicalTypeId::INTERVAL:
 		return RenderInterval(IntervalValue::Get(value));
@@ -219,11 +220,12 @@ string DatabricksLiteral::Render(const Value &value) {
 		}
 		return "map(" + StringUtil::Join(items, ", ") + ")";
 	}
+	case LogicalTypeId::TUPLE:
 	case LogicalTypeId::STRUCT: {
 		auto &children = StructValue::GetChildren(value);
 		vector<string> items;
 		for (idx_t i = 0; i < children.size(); i++) {
-			items.push_back(DatabricksQuoteString(StructType::GetChildName(value.type(), i)));
+			items.push_back(DatabricksQuoteString(StructType::GetChildName(value.type(), i).GetIdentifierName()));
 			items.push_back(Render(children[i]));
 		}
 		return "named_struct(" + StringUtil::Join(items, ", ") + ")";

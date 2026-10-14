@@ -7,6 +7,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
+#include "duckdb/planner/operator/logical_insert.hpp"
 #include "storage/databricks_catalog.hpp"
 #include "databricks_ddl.hpp"
 #include "storage/databricks_table_entry.hpp"
@@ -18,8 +19,8 @@ static constexpr idx_t INSERT_HARD_CAP = static_cast<idx_t>(16) * 1024 * 1024;
 DatabricksInsert::DatabricksInsert(PhysicalPlan &physical_plan, LogicalOperator &op, DatabricksTableEntry &table,
                                    vector<DatabricksInsertColumn> columns_p)
     : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, op.types, 1),
-      catalog_name(table.catalog.GetName()), schema_name(table.schema.name), table_name(table.name),
-      columns(std::move(columns_p)) {
+      catalog_name(table.catalog.GetName().GetIdentifierName()), schema_name(table.schema.name.GetIdentifierName()),
+      table_name(table.name.GetIdentifierName()), columns(std::move(columns_p)) {
 	vector<string> names;
 	for (auto &column : columns) {
 		names.push_back(DatabricksQuoteIdentifier(column.name));
@@ -32,15 +33,16 @@ DatabricksInsert::DatabricksInsert(PhysicalPlan &physical_plan, LogicalOperator 
 
 DatabricksInsert::DatabricksInsert(PhysicalPlan &physical_plan, LogicalOperator &op, DatabricksCatalog &catalog,
                                    const string &schema, unique_ptr<CreateTableInfo> create_info_p)
-    : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, op.types, 1), catalog_name(catalog.GetName()),
-      schema_name(schema), table_name(create_info_p->table), create_info(std::move(create_info_p)) {
+    : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, op.types, 1),
+      catalog_name(catalog.GetName().GetIdentifierName()), schema_name(schema),
+      table_name(create_info_p->GetTableName().GetIdentifierName()), create_info(std::move(create_info_p)) {
 }
 
 vector<DatabricksInsertColumn>
 DatabricksInsert::GetInsertColumns(DatabricksTableEntry &table,
                                    const physical_index_vector_t<idx_t> &column_index_map) {
 	table.ThrowIfColumnsCollide();
-	auto &table_columns = table.GetColumns();
+	auto &table_columns = table.GetDatabricksColumns();
 	vector<DatabricksInsertColumn> result;
 	for (idx_t i = 0; i < table_columns.size(); i++) {
 		auto source_index = i;
@@ -53,9 +55,27 @@ DatabricksInsert::GetInsertColumns(DatabricksTableEntry &table,
 		result.push_back(DatabricksInsertColumn {table_columns[i].name, source_index});
 	}
 	if (result.empty()) {
-		throw NotImplementedException("INSERT into Databricks table \"%s\" must write at least one column", table.name);
+		throw NotImplementedException("INSERT into Databricks table \"%s\" must write at least one column",
+		                              table.name.GetIdentifierName());
 	}
 	return result;
+}
+
+vector<DatabricksInsertColumn> DatabricksInsert::GetInsertColumns(DatabricksTableEntry &table,
+                                                                  const LogicalInsert &op) {
+	if (!op.column_index_map.empty()) {
+		return GetInsertColumns(table, op.column_index_map);
+	}
+	// ResolveInputProjection moved the bound defaults of omitted columns into the input projection
+	physical_index_vector_t<idx_t> column_index_map;
+	idx_t source_index = 0;
+	for (auto &column : table.GetColumns().Physical()) {
+		auto storage_index = column.StorageOid();
+		auto omitted = storage_index < op.bound_defaults.size() && !op.bound_defaults[storage_index];
+		column_index_map.push_back(omitted ? DConstants::INVALID_INDEX : source_index);
+		source_index++;
+	}
+	return GetInsertColumns(table, column_index_map);
 }
 
 namespace {
@@ -107,9 +127,11 @@ static void PrepareTarget(const DatabricksInsert &op, ClientContext &context, Da
 	if (info.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
 		catalog.InvalidateTables(op.schema_name);
 		auto transaction = catalog.GetCatalogTransaction(context);
-		auto schema = catalog.LookupSchema(transaction, EntryLookupInfo(CatalogType::SCHEMA_ENTRY, op.schema_name),
-		                                   OnEntryNotFound::RETURN_NULL);
-		if (schema && schema->LookupEntry(transaction, EntryLookupInfo(CatalogType::TABLE_ENTRY, info.table))) {
+		auto schema = catalog.LookupSchema(
+		    transaction, EntryLookupInfo(CatalogType::SCHEMA_ENTRY, QualifiedName(Identifier(op.schema_name))),
+		    OnEntryNotFound::RETURN_NULL);
+		if (schema && schema->LookupEntry(
+		                  transaction, EntryLookupInfo(CatalogType::TABLE_ENTRY, QualifiedName(info.GetTableName())))) {
 			gstate.skip = true;
 			return;
 		}
@@ -118,14 +140,15 @@ static void PrepareTarget(const DatabricksInsert &op, ClientContext &context, Da
 	gstate.created = true;
 	idx_t source = 0;
 	for (auto &column : info.columns.Logical()) {
-		gstate.columns.push_back(DatabricksInsertColumn {column.Name(), source++});
+		gstate.columns.push_back(DatabricksInsertColumn {column.Name().GetIdentifierName(), source++});
 	}
 	vector<string> names;
 	for (auto &column : gstate.columns) {
 		names.push_back(DatabricksQuoteIdentifier(column.name));
 	}
-	gstate.prefix = "INSERT INTO " + DatabricksQualifiedName(gstate.catalog, op.schema_name, info.table) + " (" +
-	                StringUtil::Join(names, ", ") + ") VALUES ";
+	gstate.prefix = "INSERT INTO " +
+	                DatabricksQualifiedName(gstate.catalog, op.schema_name, info.GetTableName().GetIdentifierName()) +
+	                " (" + StringUtil::Join(names, ", ") + ") VALUES ";
 }
 
 static void Flush(const DatabricksInsert &op, ClientContext &context, DatabricksInsertGlobalState &gstate,
@@ -145,10 +168,9 @@ static void Flush(const DatabricksInsert &op, ClientContext &context, Databricks
 			try {
 				DropInfo drop;
 				drop.type = CatalogType::TABLE_ENTRY;
-				drop.schema = op.schema_name;
-				drop.name = op.table_name;
+				drop.SetName(Identifier(op.table_name));
 				drop.if_not_found = OnEntryNotFound::RETURN_NULL;
-				DatabricksDdl::DropTable(context, catalog, drop);
+				DatabricksDdl::DropTable(context, catalog, op.schema_name, drop);
 			} catch (std::exception &drop_error) {
 				DUCKDB_LOG_WARNING(context,
 				                   "Databricks CREATE TABLE AS failed and the new table could not be dropped: %s",
@@ -238,8 +260,7 @@ SourceResultType DatabricksInsert::GetDataInternal(ExecutionContext &context, Da
 	(void)context;
 	(void)input;
 	auto &gstate = sink_state->Cast<DatabricksInsertGlobalState>();
-	chunk.SetCardinality(1);
-	chunk.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(gstate.rows_sent.load())));
+	chunk.data[0].Append(Value::BIGINT(NumericCast<int64_t>(gstate.rows_sent.load())));
 	return SourceResultType::FINISHED;
 }
 

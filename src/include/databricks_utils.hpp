@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/identifier.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -17,6 +18,10 @@ inline string DatabricksQuoteIdentifier(const string &name) {
 	}
 	result.push_back('`');
 	return result;
+}
+
+inline string DatabricksQuoteIdentifier(const Identifier &name) {
+	return DatabricksQuoteIdentifier(name.GetIdentifierName());
 }
 
 //! Databricks string literal. Backslash and quote are escaped; other bytes are copied.
@@ -37,6 +42,10 @@ inline string DatabricksQualifiedName(const string &catalog, const string &schem
 	       DatabricksQuoteIdentifier(table);
 }
 
+inline string DatabricksQualifiedName(const string &catalog, const Identifier &schema, const Identifier &table) {
+	return DatabricksQualifiedName(catalog, schema.GetIdentifierName(), table.GetIdentifierName());
+}
+
 inline string DatabricksRedactUrl(const string &url) {
 	auto query = url.find('?');
 	if (query == string::npos) {
@@ -47,7 +56,7 @@ inline string DatabricksRedactUrl(const string &url) {
 
 inline idx_t DatabricksSettingIndex(ClientContext &context, const string &key, idx_t fallback) {
 	Value value;
-	if (!context.TryGetCurrentSetting(key, value) || value.IsNull()) {
+	if (!context.TryGetCurrentSetting(Identifier(key), value) || value.IsNull()) {
 		return fallback;
 	}
 	return UBigIntValue::Get(value.DefaultCastAs(LogicalType::UBIGINT));
@@ -55,7 +64,7 @@ inline idx_t DatabricksSettingIndex(ClientContext &context, const string &key, i
 
 inline bool DatabricksSettingBool(ClientContext &context, const string &key, bool fallback) {
 	Value value;
-	if (!context.TryGetCurrentSetting(key, value) || value.IsNull()) {
+	if (!context.TryGetCurrentSetting(Identifier(key), value) || value.IsNull()) {
 		return fallback;
 	}
 	return BooleanValue::Get(value.DefaultCastAs(LogicalType::BOOLEAN));
@@ -63,7 +72,7 @@ inline bool DatabricksSettingBool(ClientContext &context, const string &key, boo
 
 inline string DatabricksSettingString(ClientContext &context, const string &key, const string &fallback) {
 	Value value;
-	if (!context.TryGetCurrentSetting(key, value) || value.IsNull()) {
+	if (!context.TryGetCurrentSetting(Identifier(key), value) || value.IsNull()) {
 		return fallback;
 	}
 	return StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));

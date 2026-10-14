@@ -14,11 +14,18 @@ find_package(Arrow CONFIG REQUIRED)
 include_directories(src/include)
 add_subdirectory(src)
 
-# Object libraries compile their own sources, so they need the third-party include
-# paths. Linking them PRIVATE does not replace the LINK_ONLY link on the extension.
+# Object libraries compile their own sources, so they need the third-party
+# include paths. Linking them PRIVATE does not replace the LINK_ONLY link on the
+# extension.
 target_link_libraries(
-  databricks_ext PRIVATE CURL::libcurl OpenSSL::SSL OpenSSL::Crypto nlohmann_json::nlohmann_json
-                         "$<IF:$<BOOL:${ARROW_BUILD_STATIC}>,Arrow::arrow_static,Arrow::arrow_shared>")
+  databricks_ext
+  PRIVATE
+    CURL::libcurl
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    nlohmann_json::nlohmann_json
+    "$<IF:$<BOOL:${ARROW_BUILD_STATIC}>,Arrow::arrow_static,Arrow::arrow_shared>"
+)
 
 # clang-tidy invokes Clang, which rejects this GCC flag.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT CLANG_TIDY)
@@ -35,7 +42,8 @@ set(DATABRICKS_LINK_LIBS
     OpenSSL::SSL
     OpenSSL::Crypto
     nlohmann_json::nlohmann_json
-    "$<IF:$<BOOL:${ARROW_BUILD_STATIC}>,Arrow::arrow_static,Arrow::arrow_shared>")
+    "$<IF:$<BOOL:${ARROW_BUILD_STATIC}>,Arrow::arrow_static,Arrow::arrow_shared>"
+)
 if(WIN32)
   list(APPEND DATABRICKS_LINK_LIBS ws2_32 crypt32)
 endif()
@@ -44,7 +52,8 @@ function(link_libraries_to_extension target_name)
   target_link_libraries(${target_name} ${DATABRICKS_LINK_LIBS})
   get_target_property(target_type ${target_name} TYPE)
   if(target_type STREQUAL "STATIC_LIBRARY")
-    get_target_property(interface_link_libraries ${target_name} INTERFACE_LINK_LIBRARIES)
+    get_target_property(interface_link_libraries ${target_name}
+                        INTERFACE_LINK_LIBRARIES)
     if(interface_link_libraries STREQUAL "interface_link_libraries-NOTFOUND")
       set(interface_link_libraries "")
     endif()
@@ -52,7 +61,8 @@ function(link_libraries_to_extension target_name)
       list(REMOVE_ITEM interface_link_libraries "${link_dep}")
       list(APPEND interface_link_libraries "$<LINK_ONLY:${link_dep}>")
     endforeach()
-    set_property(TARGET ${target_name} PROPERTY INTERFACE_LINK_LIBRARIES "${interface_link_libraries}")
+    set_property(TARGET ${target_name} PROPERTY INTERFACE_LINK_LIBRARIES
+                                                "${interface_link_libraries}")
   endif()
 endfunction()
 

@@ -1,6 +1,8 @@
 #include "storage/databricks_storage_extension.hpp"
 
 #include "databricks_secrets.hpp"
+#include "duckdb/common/exception/binder_exception.hpp"
+#include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/parser/parsed_data/attach_info.hpp"

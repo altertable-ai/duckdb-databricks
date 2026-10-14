@@ -9,7 +9,7 @@
 namespace duckdb {
 
 static unique_ptr<FunctionData> QueryBind(ClientContext &context, TableFunctionBindInput &input,
-                                          vector<LogicalType> &return_types, vector<string> &names) {
+                                          vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (!Settings::Get<EnableExternalAccessSetting>(context)) {
 		throw PermissionException("Reading from Databricks is disabled through configuration");
 	}
@@ -24,7 +24,7 @@ static unique_ptr<FunctionData> QueryBind(ClientContext &context, TableFunctionB
 	auto result = make_uniq<DatabricksScanBindData>();
 	result->session = catalog.GetSession();
 	result->catalog = catalog.GetConfig().catalog;
-	result->schema = catalog.GetDefaultSchema();
+	result->schema = catalog.DefaultSchemaName();
 	result->query = sql;
 	result->result =
 	    result->session->Execute(context, DatabricksStatementMode::SCAN, sql, result->catalog, result->schema, {});
@@ -35,7 +35,7 @@ static unique_ptr<FunctionData> QueryBind(ClientContext &context, TableFunctionB
 	for (auto &column : result->result.columns) {
 		auto type_text = column.type_text.empty() ? column.type_name : column.type_text;
 		auto type = DatabricksTypes::Parse(type_text);
-		names.push_back(column.name);
+		names.push_back(Identifier(column.name));
 		return_types.push_back(type);
 		DatabricksColumn stored;
 		stored.name = column.name;
