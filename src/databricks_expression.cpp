@@ -109,11 +109,21 @@ static bool IsPrefixLike(const string &pattern, string &prefix) {
 	return prefix.find('%') == string::npos && prefix.find('_') == string::npos && !prefix.empty();
 }
 
-static const Value *ConstantValue(const Expression &expr) {
-	if (expr.GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
-		return nullptr;
+//! A constant, or a cast of one. DuckDB binds LIKE string literals as CAST('...' AS VARCHAR), which stays
+//! unfolded when the expression rewriter is off; the cast is applied here as constant folding would.
+static optional<Value> ConstantValue(const Expression &expr) {
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+		return expr.Cast<BoundConstantExpression>().GetValue();
 	}
-	return &expr.Cast<BoundConstantExpression>().GetValue();
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION || !BoundCastExpression::IsCast(expr)) {
+		return {};
+	}
+	auto &cast_expr = expr.Cast<BoundFunctionExpression>();
+	auto &child = BoundCastExpression::Child(cast_expr);
+	if (BoundCastExpression::IsTryCast(cast_expr) || child.GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+		return {};
+	}
+	return child.Cast<BoundConstantExpression>().GetValue().DefaultTryCastAs(cast_expr.GetReturnType(), nullptr, true);
 }
 
 static string BetweenSql(const string &input, const string &lower, const string &upper, bool lower_inclusive,
